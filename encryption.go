@@ -435,7 +435,11 @@ func (e *Encryption) PrepareEncryptedRequest(client *Client, endpoint string, me
 		encrypted_message = []byte{}
 		message_chunks := [][]byte{}
 		for i := 0; i < len(message); i += sixTenKB {
-			message_chunks = append(message_chunks, message[i:i+sixTenKB])
+			end := i + sixTenKB
+			if end > len(message) {
+				end = len(message)
+			}
+			message_chunks = append(message_chunks, message[i:end])
 		}
 		for _, message_chunk := range message_chunks {
 			encrypted_chunk, err := e.encryptMessage(message_chunk, host)
@@ -537,18 +541,46 @@ func deleteEmpty(b [][]byte) [][]byte {
 // on call to textproto.ReadMIMEHeader
 // because of "The first line cannot start with a leading space."
 func (e *Encryption) decryptResponse(response *http.Response, host string) ([]byte, error) {
-	body, _ := io.ReadAll(response.Body)
+	if response == nil || response.Body == nil {
+		return nil, errors.New("encrypted response body is empty")
+	}
+
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		return nil, fmt.Errorf("unable to read encrypted response body: %w", err)
+	}
+	if err := response.Body.Close(); err != nil {
+		return nil, fmt.Errorf("unable to close encrypted response body: %w", err)
+	}
+
 	parts := deleteEmpty(bytes.Split(body, []byte(mimeBoundary+"\r\n")))
+	if len(parts) < 2 {
+		return nil, errors.New("encrypted response has invalid MIME structure")
+	}
+
 	var message []byte
 
 	for i := 0; i < len(parts); i += 2 {
+		if i+1 >= len(parts) {
+			return nil, errors.New("encrypted response has unpaired MIME header/payload block")
+		}
+
 		header := parts[i]
 		payload := parts[i+1]
 
-		expectedLengthStr := bytes.SplitAfter(header, []byte("Length="))[1]
+		lengthPos := bytes.Index(header, []byte("Length="))
+		if lengthPos == -1 {
+			return nil, errors.New("encrypted response header is missing OriginalContent length")
+		}
+
+		expectedLengthStr := header[lengthPos+len("Length="):]
+		if lineEnd := bytes.Index(expectedLengthStr, []byte("\r\n")); lineEnd != -1 {
+			expectedLengthStr = expectedLengthStr[:lineEnd]
+		}
+
 		expectedLength, err := strconv.Atoi(string(bytes.TrimSpace(expectedLengthStr)))
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("unable to parse encrypted response length: %w", err)
 		}
 
 		// remove the end MIME block if it exists
@@ -588,9 +620,24 @@ func (e *Encryption) decryptMessage(encryptedData []byte, host string) ([]byte, 
 }
 
 func (e *Encryption) decryptNtlmMessage(encryptedData []byte, host string) ([]byte, error) {
+	if len(encryptedData) < 4 {
+		return nil, errors.New("ntlm encrypted payload is truncated: missing signature length")
+	}
+
 	signatureLength := int(binary.LittleEndian.Uint32(encryptedData[:4]))
+	if signatureLength <= 0 {
+		return nil, fmt.Errorf("ntlm encrypted payload has invalid signature length: %d", signatureLength)
+	}
+
+	if len(encryptedData) < 4+signatureLength {
+		return nil, fmt.Errorf("ntlm encrypted payload is truncated: need at least %d bytes", 4+signatureLength)
+	}
+
 	signature := encryptedData[4 : signatureLength+4]
 	encryptedMessage := encryptedData[signatureLength+4:]
+	if len(encryptedMessage) == 0 {
+		return nil, errors.New("ntlm encrypted payload is missing sealed message")
+	}
 
 	message, err := e.ntlmClient.SecuritySession().Unwrap(encryptedMessage, signature)
 	if err != nil {
