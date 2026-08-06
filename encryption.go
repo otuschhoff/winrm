@@ -13,6 +13,9 @@ import (
 
 	"github.com/bodgit/ntlmssp"
 	ntlmhttp "github.com/bodgit/ntlmssp/http"
+	krbcrypto "github.com/jcmturner/gokrb5/v8/crypto"
+	"github.com/jcmturner/gokrb5/v8/gssapi"
+	"github.com/jcmturner/gokrb5/v8/iana/keyusage"
 	"github.com/jcmturner/gokrb5/v8/spnego"
 	"github.com/masterzen/winrm/soap"
 )
@@ -527,7 +530,66 @@ func (enc *Encryption) buildNTLMMessage(message []byte, host string) ([]byte, er
 }
 
 func (e *Encryption) buildKerberosMessage(message []byte, host string) ([]byte, error) {
-	return nil, errors.New("kerberos wrap/unwrap is not implemented yet (phase 3)")
+	_ = host
+
+	if e.kerberos == nil {
+		return nil, errors.New("kerberos encrypted transport is not initialized")
+	}
+
+	context, err := e.kerberos.getOrCreateContext()
+	if err != nil {
+		return nil, err
+	}
+
+	context.mu.Lock()
+	defer context.mu.Unlock()
+
+	if len(context.serviceSessionKey.KeyValue) == 0 {
+		return nil, errors.New("kerberos service session key is not initialized")
+	}
+
+	etype, err := krbcrypto.GetEtype(context.serviceSessionKey.KeyType)
+	if err != nil {
+		return nil, fmt.Errorf("unable to resolve kerberos etype: %w", err)
+	}
+
+	_, sealedMessage, err := etype.EncryptMessage(context.serviceSessionKey.KeyValue, message, keyusage.GSSAPI_INITIATOR_SEAL)
+	if err != nil {
+		return nil, fmt.Errorf("unable to kerberos-seal message: %w", err)
+	}
+
+	flags := byte(0x02) // sealed flag set, initiator token
+	if context.acceptorSubKey != nil {
+		flags |= 0x04
+	}
+
+	wrapToken := &gssapi.WrapToken{
+		Flags:     flags,
+		EC:        uint16(etype.GetHMACBitLength() / 8),
+		RRC:       0,
+		SndSeqNum: context.initiatorSeq,
+		Payload:   message,
+	}
+
+	if err := wrapToken.SetCheckSum(context.serviceSessionKey, keyusage.GSSAPI_INITIATOR_SEAL); err != nil {
+		return nil, fmt.Errorf("unable to sign kerberos wrap token: %w", err)
+	}
+
+	signature, err := wrapToken.Marshal()
+	if err != nil {
+		return nil, fmt.Errorf("unable to serialize kerberos wrap token: %w", err)
+	}
+
+	context.initiatorSeq++
+
+	buf := new(bytes.Buffer)
+	if err := binary.Write(buf, binary.LittleEndian, uint32(len(signature))); err != nil {
+		return nil, err
+	}
+	buf.Write(signature)
+	buf.Write(sealedMessage)
+
+	return buf.Bytes(), nil
 }
 
 /* credssp is currently unimplemented, leave holder for future to keep in sync with python implementation
