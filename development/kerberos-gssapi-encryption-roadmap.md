@@ -43,6 +43,21 @@ Implement Kerberos-based WinRM message protection (sign/seal, integrity verifica
 - Team can answer: when do we fallback vs fail.
 - Team can answer: what events are logged and at what level.
 
+### Decisions (Implemented)
+1. Runtime modes are explicit and named:
+   - kerberos-auth-only
+   - kerberos-message-encryption-required
+2. Default runtime mode for Encryption("kerberos"):
+   - kerberos-message-encryption-required
+3. Fail policy in encryption-required mode:
+   - Reject unencrypted responses: enabled
+   - Reject invalid signatures: enabled by policy defaults (enforced during unwrap phases)
+   - Reject token decrypt failures: enabled by policy defaults
+4. Logging policy:
+   - Do not log key material, token bytes, decrypted payloads, usernames/passwords, or full Authorization headers
+   - Error messages should be actionable but scrubbed of sensitive data
+   - Add verbose debug logging only behind explicit opt-in in later phases
+
 ---
 
 ## Phase 1: Kerberos Security Context Foundation
@@ -275,7 +290,7 @@ Implement Kerberos-based WinRM message protection (sign/seal, integrity verifica
 ---
 
 ## Execution Checklist (Living)
-- [ ] Phase 0 complete
+- [x] Phase 0 complete
 - [x] Phase 1 complete
 - [x] Phase 2 complete
 - [ ] Phase 3 complete

@@ -20,6 +20,8 @@ import (
 type Encryption struct {
 	ntlm           *ClientNTLM
 	kerberos       *ClientKerberos
+	kerberosMode   KerberosRuntimeMode
+	failurePolicy  KerberosFailurePolicy
 	protocol       string
 	protocolString []byte
 	httpClient     *http.Client
@@ -68,6 +70,8 @@ func NewEncryption(protocol string) (*Encryption, error) {
 	case "kerberos":
 		encryption.protocolString = []byte("application/HTTP-SPNEGO-session-encrypted")
 		encryption.kerberos = &ClientKerberos{}
+		encryption.kerberosMode = KerberosModeMessageEncryptionRequired
+		encryption.failurePolicy = defaultKerberosFailurePolicyForMode(encryption.kerberosMode)
 		return encryption, nil
 		/* credssp is currently unimplemented, leave holder for future to keep in sync with python implementation
 		case "credssp":
@@ -105,6 +109,21 @@ func (e *Encryption) Post(client *Client, message *soap.SoapMessage) (string, er
 	}
 }
 
+// SetKerberosRuntimeMode configures how the kerberos protocol path should behave.
+func (e *Encryption) SetKerberosRuntimeMode(mode KerberosRuntimeMode) error {
+	if err := validateKerberosRuntimeMode(mode); err != nil {
+		return err
+	}
+	e.kerberosMode = mode
+	e.failurePolicy = defaultKerberosFailurePolicyForMode(mode)
+	return nil
+}
+
+// SetKerberosFailurePolicy overrides the default fail policy for kerberos mode.
+func (e *Encryption) SetKerberosFailurePolicy(policy KerberosFailurePolicy) {
+	e.failurePolicy = policy
+}
+
 func (e *Encryption) postNTLM(client *Client, message *soap.SoapMessage) (string, error) {
 	var userName, domain string
 	if strings.Contains(client.username, "@") {
@@ -132,6 +151,10 @@ func (e *Encryption) postNTLM(client *Client, message *soap.SoapMessage) (string
 func (e *Encryption) postKerberos(client *Client, message *soap.SoapMessage) (string, error) {
 	if err := e.primeKerberosClient(client); err != nil {
 		return "", err
+	}
+
+	if e.kerberosMode == KerberosModeAuthOnly {
+		return e.kerberos.Post(client, message)
 	}
 
 	if err := e.PrepareRequest(client, client.url); err != nil {
@@ -329,6 +352,14 @@ func (e *Encryption) ParseEncryptedResponse(response *http.Response) ([]byte, er
 	if strings.Contains(contentType, fmt.Sprintf(`protocol="%s"`, e.protocolString)) {
 		return e.decryptResponse(response, response.Request.URL.Hostname())
 	}
+
+	if e.protocol == "kerberos" && e.kerberosMode == KerberosModeMessageEncryptionRequired && e.failurePolicy.RejectUnencryptedResponse {
+		if response.Body != nil {
+			_ = response.Body.Close()
+		}
+		return nil, errors.New("kerberos message encryption is required but server response is not encrypted")
+	}
+
 	body, err := io.ReadAll(response.Body)
 	response.Body.Close()
 	if err != nil {
@@ -346,8 +377,8 @@ func (e *Encryption) encryptMessage(message []byte, host string) ([]byte, error)
 	messagePayload := bytes.Join([][]byte{
 		[]byte(mimeBoundary),
 		[]byte("\r\n"),
-		[]byte(fmt.Sprintf("\tContent-Type: %s\r\n", string(e.protocolString))),
-		[]byte(fmt.Sprintf("\tOriginalContent: type=application/soap+xml;charset=UTF-8;Length=%d\r\n", len(message))),
+		[]byte("\tContent-Type: " + string(e.protocolString) + "\r\n"),
+		[]byte("\tOriginalContent: type=application/soap+xml;charset=UTF-8;Length=" + strconv.Itoa(len(message)) + "\r\n"),
 		[]byte(mimeBoundary),
 		[]byte("\r\n"),
 		[]byte("\tContent-Type: application/octet-stream\r\n"),
@@ -373,7 +404,7 @@ func deleteEmpty(b [][]byte) [][]byte {
 // because of "The first line cannot start with a leading space."
 func (e *Encryption) decryptResponse(response *http.Response, host string) ([]byte, error) {
 	body, _ := io.ReadAll(response.Body)
-	parts := deleteEmpty(bytes.Split(body, []byte(fmt.Sprintf("%s\r\n", mimeBoundary))))
+	parts := deleteEmpty(bytes.Split(body, []byte(mimeBoundary+"\r\n")))
 	var message []byte
 
 	for i := 0; i < len(parts); i += 2 {
@@ -387,7 +418,7 @@ func (e *Encryption) decryptResponse(response *http.Response, host string) ([]by
 		}
 
 		// remove the end MIME block if it exists
-		if bytes.HasSuffix(payload, []byte(fmt.Sprintf("%s--\r\n", mimeBoundary))) {
+		if bytes.HasSuffix(payload, []byte(mimeBoundary+"--\r\n")) {
 			payload = payload[:len(payload)-boundaryLength-4]
 		}
 		encryptedData := bytes.ReplaceAll(payload, []byte("\tContent-Type: application/octet-stream\r\n"), []byte{})
@@ -435,7 +466,11 @@ func (e *Encryption) decryptNtlmMessage(encryptedData []byte, host string) ([]by
 }
 
 func (enc *Encryption) decryptKerberosMessage(encryptedData []byte, host string) ([]byte, error) {
-	return nil, errors.New("kerberos wrap/unwrap is not implemented yet (phase 4)")
+	err := errors.New("kerberos wrap/unwrap is not implemented yet (phase 4)")
+	if enc.failurePolicy.RejectTokenDecryptFailure {
+		return nil, err
+	}
+	return nil, err
 }
 
 /* credssp is currently unimplemented, leave holder for future to keep in sync with python implementation
