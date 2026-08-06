@@ -2,6 +2,7 @@ package winrm
 
 import (
 	"bytes"
+	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -16,7 +17,9 @@ import (
 	krbcrypto "github.com/jcmturner/gokrb5/v8/crypto"
 	"github.com/jcmturner/gokrb5/v8/gssapi"
 	"github.com/jcmturner/gokrb5/v8/iana/keyusage"
+	"github.com/jcmturner/gokrb5/v8/messages"
 	"github.com/jcmturner/gokrb5/v8/spnego"
+	"github.com/jcmturner/gokrb5/v8/types"
 	"github.com/masterzen/winrm/soap"
 )
 
@@ -244,10 +247,138 @@ func (e *Encryption) doRequest(req *http.Request) (*http.Response, error) {
 		}
 
 		httpClient := &http.Client{Transport: e.kerberos.transport}
-		return httpClient.Do(req)
+		resp, err := httpClient.Do(req)
+		if err != nil {
+			return nil, err
+		}
+
+		if err := e.processKerberosResponseAuth(resp); err != nil {
+			if e.failurePolicy.RejectTokenDecryptFailure {
+				_ = resp.Body.Close()
+				return nil, err
+			}
+		}
+
+		return resp, nil
 	default:
 		return nil, fmt.Errorf("Encryption for protocol '%s' not supported", e.protocol)
 	}
+}
+
+func (e *Encryption) processKerberosResponseAuth(resp *http.Response) error {
+	if resp == nil || resp.Header == nil || e.kerberos == nil {
+		return nil
+	}
+
+	authHeaders := resp.Header.Values("WWW-Authenticate")
+	for _, authHeader := range authHeaders {
+		authHeader = strings.TrimSpace(authHeader)
+		if authHeader == "" || !strings.HasPrefix(strings.ToLower(authHeader), "negotiate ") {
+			continue
+		}
+
+		tokenB64 := strings.TrimSpace(authHeader[len("Negotiate "):])
+		if tokenB64 == "" {
+			continue
+		}
+
+		tokenBytes, err := base64.StdEncoding.DecodeString(tokenB64)
+		if err != nil {
+			return fmt.Errorf("unable to decode SPNEGO response token: %w", err)
+		}
+
+		var spnegoToken spnego.SPNEGOToken
+		if err := spnegoToken.Unmarshal(tokenBytes); err != nil {
+			return fmt.Errorf("unable to parse SPNEGO response token: %w", err)
+		}
+
+		if !spnegoToken.Resp || len(spnegoToken.NegTokenResp.ResponseToken) == 0 {
+			return nil
+		}
+
+		var krbToken spnego.KRB5Token
+		if err := krbToken.Unmarshal(spnegoToken.NegTokenResp.ResponseToken); err != nil {
+			return fmt.Errorf("unable to parse kerberos response token: %w", err)
+		}
+
+		if !krbToken.IsAPRep() {
+			return nil
+		}
+
+		context, err := e.kerberos.getOrCreateContext()
+		if err != nil {
+			return err
+		}
+
+		context.mu.Lock()
+		defer context.mu.Unlock()
+
+		if len(context.serviceSessionKey.KeyValue) == 0 {
+			return errors.New("kerberos service session key is not initialized for AP_REP")
+		}
+
+		encPartBytes, err := krbcrypto.DecryptEncPart(krbToken.APRep.EncPart, context.serviceSessionKey, keyusage.AP_REP_ENCPART)
+		if err != nil {
+			return fmt.Errorf("unable to decrypt AP_REP enc part: %w", err)
+		}
+
+		var encPart messages.EncAPRepPart
+		if err := encPart.Unmarshal(encPartBytes); err != nil {
+			return fmt.Errorf("unable to parse AP_REP enc part: %w", err)
+		}
+
+		e.applyKerberosAPRep(context, encPart)
+		return nil
+	}
+
+	return nil
+}
+
+func (e *Encryption) applyKerberosAPRep(context *kerberosContext, encPart messages.EncAPRepPart) {
+	if context == nil {
+		return
+	}
+
+	if encPart.Subkey.KeyType != 0 && len(encPart.Subkey.KeyValue) > 0 {
+		subKey := encPart.Subkey
+		context.acceptorSubKey = &subKey
+	}
+
+	if encPart.SequenceNumber > 0 {
+		context.acceptorSeq = uint64(encPart.SequenceNumber)
+	}
+}
+
+func (e *Encryption) kerberosOutboundKey(context *kerberosContext) (types.EncryptionKey, error) {
+	if context == nil {
+		return types.EncryptionKey{}, errors.New("kerberos context is not initialized")
+	}
+
+	if context.acceptorSubKey != nil && len(context.acceptorSubKey.KeyValue) > 0 {
+		return *context.acceptorSubKey, nil
+	}
+
+	if len(context.serviceSessionKey.KeyValue) == 0 {
+		return types.EncryptionKey{}, errors.New("kerberos service session key is not initialized")
+	}
+
+	return context.serviceSessionKey, nil
+}
+
+func (e *Encryption) kerberosInboundKey(context *kerberosContext) (types.EncryptionKey, error) {
+	if context == nil {
+		return types.EncryptionKey{}, errors.New("kerberos context is not initialized")
+	}
+
+	if context.acceptorSubKey != nil && len(context.acceptorSubKey.KeyValue) > 0 {
+		return *context.acceptorSubKey, nil
+	}
+
+	if len(context.serviceSessionKey.KeyValue) == 0 {
+		return types.EncryptionKey{}, errors.New("kerberos inbound security key is not initialized")
+	}
+
+	return context.serviceSessionKey, nil
 }
 
 func (e *Encryption) PrepareRequest(client *Client, endpoint string) error {
@@ -502,13 +633,9 @@ func (enc *Encryption) decryptKerberosMessage(encryptedData []byte, host string)
 	context.mu.Lock()
 	defer context.mu.Unlock()
 
-	inboundKey := context.serviceSessionKey
-	if context.acceptorSubKey != nil {
-		inboundKey = *context.acceptorSubKey
-	}
-
-	if len(inboundKey.KeyValue) == 0 {
-		return nil, errors.New("kerberos inbound security key is not initialized")
+	inboundKey, err := enc.kerberosInboundKey(context)
+	if err != nil {
+		return nil, err
 	}
 
 	decryptedMessage, err := krbcrypto.DecryptMessage(sealedPayload, inboundKey, keyusage.GSSAPI_ACCEPTOR_SEAL)
@@ -620,16 +747,17 @@ func (e *Encryption) buildKerberosMessage(message []byte, host string) ([]byte, 
 	context.mu.Lock()
 	defer context.mu.Unlock()
 
-	if len(context.serviceSessionKey.KeyValue) == 0 {
-		return nil, errors.New("kerberos service session key is not initialized")
+	outboundKey, err := e.kerberosOutboundKey(context)
+	if err != nil {
+		return nil, err
 	}
 
-	etype, err := krbcrypto.GetEtype(context.serviceSessionKey.KeyType)
+	etype, err := krbcrypto.GetEtype(outboundKey.KeyType)
 	if err != nil {
 		return nil, fmt.Errorf("unable to resolve kerberos etype: %w", err)
 	}
 
-	_, sealedMessage, err := etype.EncryptMessage(context.serviceSessionKey.KeyValue, message, keyusage.GSSAPI_INITIATOR_SEAL)
+	_, sealedMessage, err := etype.EncryptMessage(outboundKey.KeyValue, message, keyusage.GSSAPI_INITIATOR_SEAL)
 	if err != nil {
 		return nil, fmt.Errorf("unable to kerberos-seal message: %w", err)
 	}
@@ -647,7 +775,7 @@ func (e *Encryption) buildKerberosMessage(message []byte, host string) ([]byte, 
 		Payload:   message,
 	}
 
-	if err := wrapToken.SetCheckSum(context.serviceSessionKey, keyusage.GSSAPI_INITIATOR_SEAL); err != nil {
+	if err := wrapToken.SetCheckSum(outboundKey, keyusage.GSSAPI_INITIATOR_SEAL); err != nil {
 		return nil, fmt.Errorf("unable to sign kerberos wrap token: %w", err)
 	}
 
