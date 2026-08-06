@@ -5,7 +5,7 @@ _Note_: if you're looking for the `winrm` command-line tool, this has been split
 This is a Go library to execute remote commands on Windows machines through
 the use of WinRM/WinRS.
 
-_Note_: this library doesn't support domain users (it doesn't support GSSAPI nor Kerberos). It's primary target is to execute remote commands on EC2 windows machines.
+_Note_: this library supports Kerberos authentication and Kerberos/SPNEGO message-encryption mode. See the Kerberos sections below for configuration details and current limitations.
 
 [![Build Status](https://travis-ci.org/masterzen/winrm.svg?branch=master)](https://travis-ci.org/masterzen/winrm)
 [![Coverage Status](https://coveralls.io/repos/masterzen/winrm/badge.png)](https://coveralls.io/r/masterzen/winrm)
@@ -21,7 +21,7 @@ WinRM is available on Windows Server 2008 and up. This project natively supports
 _Note_: This library only supports Golang 1.7+
 
 ### Preparing the remote Windows machine for Basic authentication
-This project supports only basic authentication for local accounts (domain users are not supported). The remote windows system must be prepared for winrm:
+This section is specific to basic authentication for local accounts. For domain users, use Kerberos authentication as described in the Kerberos section below.
 
 _For a PowerShell script to do what is described below in one go, check [Richard Downer's blog](http://www.frontiertown.co.uk/2011/12/overthere-control-windows-from-java/)_
 
@@ -42,7 +42,7 @@ __N.B.:__ The `MaxMemoryPerShellMB` option has no effects on some Windows 2008R2
 For more information on WinRM, please refer to <a href="http://msdn.microsoft.com/en-us/library/windows/desktop/aa384426(v=vs.85).aspx">the online documentation at Microsoft's DevCenter</a>.
 
 ### Preparing the remote Windows machine for kerberos authentication
-This project supports domain users via kerberos authentication. The remote windows system must be prepared for winrm:
+This project supports domain users via Kerberos authentication. The remote windows system must be prepared for winrm:
 
 On the remote host, a PowerShell prompt, using the __Run as Administrator__ option and paste in the following lines:
 
@@ -52,6 +52,12 @@ On the remote host, a PowerShell prompt, using the __Run as Administrator__ opti
                 winrm set winrm/config/winrs '@{MaxMemoryPerShellMB="1024"}'
 
 All __N.B__ points of "Preparing the remote Windows machine for Basic authentication" also applies.
+
+Additional recommendations for Kerberos environments:
+
+- Ensure DNS forward/reverse lookups are correct for the target host.
+- Ensure the SPN matches the service endpoint (usually `HTTP/<fqdn>`).
+- Keep client and server clocks synchronized.
 
 
 ### Building the winrm go and executable
@@ -190,6 +196,50 @@ if err != nil {
 }
 
 ```
+
+### Kerberos message encryption mode
+
+When a server requires GSSAPI message encryption/sign/seal, use the kerberos encryption transport:
+
+```go
+params := winrm.DefaultParameters
+params.TransportDecorator = func() winrm.Transporter {
+  enc, err := winrm.NewEncryption("kerberos")
+  if err != nil {
+    panic(err)
+  }
+
+  // Default mode is kerberos-message-encryption-required.
+  // Optional: switch to authentication-only mode.
+  // _ = enc.SetKerberosRuntimeMode(winrm.KerberosModeAuthOnly)
+
+  return enc
+}
+```
+
+Runtime modes:
+
+- `kerberos-message-encryption-required` (default): requires encrypted multipart responses and fails closed on protection failures.
+- `kerberos-auth-only`: Kerberos authentication only (no message-level sign/seal wrapping by this transport).
+
+### Kerberos troubleshooting
+
+- SPN mismatch:
+  Use `HTTP/<fqdn>` and verify DNS/canonical name resolution matches your service principal.
+- CCache or login failures:
+  Verify `KrbConf`, realm, credentials, and ticket validity (`klist`).
+- Unencrypted response rejected in required mode:
+  Server is not returning SPNEGO session-encrypted multipart payloads. Check WinRM policy and server auth settings.
+- Signature/decrypt failures:
+  Check for intermediary/proxy rewriting, ticket/session expiry, and clock skew.
+
+### Migration notes
+
+Recent Kerberos transport behavior is stricter in encryption-required mode:
+
+- Kerberos encrypted transport no longer silently falls back to plaintext when encryption is required.
+- Invalid/truncated encrypted framing is rejected with explicit errors.
+- Negotiated AP_REP subkey (when provided by server) is applied to message protection key selection.
 
 
 By passing a Dial in the Parameters struct it is possible to use different dialer (e.g. tunnel through SSH)
