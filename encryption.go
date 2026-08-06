@@ -469,11 +469,87 @@ func (e *Encryption) decryptNtlmMessage(encryptedData []byte, host string) ([]by
 }
 
 func (enc *Encryption) decryptKerberosMessage(encryptedData []byte, host string) ([]byte, error) {
-	err := errors.New("kerberos wrap/unwrap is not implemented yet (phase 4)")
-	if enc.failurePolicy.RejectTokenDecryptFailure {
+	_ = host
+
+	if enc.kerberos == nil {
+		return nil, errors.New("kerberos encrypted transport is not initialized")
+	}
+
+	if len(encryptedData) < 4 {
+		return nil, errors.New("kerberos encrypted payload is truncated: missing signature length")
+	}
+
+	signatureLength := int(binary.LittleEndian.Uint32(encryptedData[:4]))
+	if signatureLength <= 0 {
+		return nil, fmt.Errorf("kerberos encrypted payload has invalid signature length: %d", signatureLength)
+	}
+
+	if len(encryptedData) < 4+signatureLength {
+		return nil, fmt.Errorf("kerberos encrypted payload is truncated: need at least %d bytes", 4+signatureLength)
+	}
+
+	signature := encryptedData[4 : 4+signatureLength]
+	sealedPayload := encryptedData[4+signatureLength:]
+	if len(sealedPayload) == 0 {
+		return nil, errors.New("kerberos encrypted payload is missing sealed message")
+	}
+
+	context, err := enc.kerberos.getOrCreateContext()
+	if err != nil {
 		return nil, err
 	}
-	return nil, err
+
+	context.mu.Lock()
+	defer context.mu.Unlock()
+
+	inboundKey := context.serviceSessionKey
+	if context.acceptorSubKey != nil {
+		inboundKey = *context.acceptorSubKey
+	}
+
+	if len(inboundKey.KeyValue) == 0 {
+		return nil, errors.New("kerberos inbound security key is not initialized")
+	}
+
+	decryptedMessage, err := krbcrypto.DecryptMessage(sealedPayload, inboundKey, keyusage.GSSAPI_ACCEPTOR_SEAL)
+	if err != nil {
+		if enc.failurePolicy.RejectTokenDecryptFailure {
+			return nil, fmt.Errorf("unable to kerberos-unseal message: %w", err)
+		}
+		return nil, fmt.Errorf("unable to kerberos-unseal message: %w", err)
+	}
+
+	var wrapToken gssapi.WrapToken
+	if err := wrapToken.Unmarshal(signature, true); err != nil {
+		if enc.failurePolicy.RejectInvalidSignature {
+			return nil, fmt.Errorf("unable to parse kerberos wrap signature: %w", err)
+		}
+		return nil, fmt.Errorf("unable to parse kerberos wrap signature: %w", err)
+	}
+
+	if ok, err := wrapToken.Verify(inboundKey, keyusage.GSSAPI_ACCEPTOR_SEAL); err != nil || !ok {
+		if enc.failurePolicy.RejectInvalidSignature {
+			if err != nil {
+				return nil, fmt.Errorf("kerberos wrap signature verification failed: %w", err)
+			}
+			return nil, errors.New("kerberos wrap signature verification failed")
+		}
+		if err != nil {
+			return nil, fmt.Errorf("kerberos wrap signature verification failed: %w", err)
+		}
+		return nil, errors.New("kerberos wrap signature verification failed")
+	}
+
+	if wrapToken.SndSeqNum != context.acceptorSeq {
+		return nil, fmt.Errorf("kerberos acceptor sequence mismatch: expected %d got %d", context.acceptorSeq, wrapToken.SndSeqNum)
+	}
+
+	if !bytes.Equal(wrapToken.Payload, decryptedMessage) {
+		return nil, errors.New("kerberos wrap payload mismatch after decrypt")
+	}
+
+	context.acceptorSeq++
+	return decryptedMessage, nil
 }
 
 /* credssp is currently unimplemented, leave holder for future to keep in sync with python implementation

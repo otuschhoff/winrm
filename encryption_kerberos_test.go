@@ -36,9 +36,9 @@ func TestDecryptMessageRoutesKerberos(t *testing.T) {
 	e := &Encryption{protocol: "kerberos"}
 	_, err := e.decryptMessage([]byte("payload"), "host")
 	if err == nil {
-		t.Fatal("expected error for unimplemented kerberos unwrap")
+		t.Fatal("expected error when kerberos transport is not initialized")
 	}
-	if !strings.Contains(err.Error(), "phase 4") {
+	if !strings.Contains(err.Error(), "not initialized") {
 		t.Fatalf("unexpected error: %v", err)
 	}
 }
