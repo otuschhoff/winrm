@@ -13,11 +13,13 @@ import (
 
 	"github.com/bodgit/ntlmssp"
 	ntlmhttp "github.com/bodgit/ntlmssp/http"
+	"github.com/jcmturner/gokrb5/v8/spnego"
 	"github.com/masterzen/winrm/soap"
 )
 
 type Encryption struct {
 	ntlm           *ClientNTLM
+	kerberos       *ClientKerberos
 	protocol       string
 	protocolString []byte
 	httpClient     *http.Client
@@ -63,11 +65,13 @@ func NewEncryption(protocol string) (*Encryption, error) {
 	case "ntlm":
 		encryption.protocolString = []byte("application/HTTP-SPNEGO-session-encrypted")
 		return encryption, nil
-		/* credssp and kerberos is currently unimplemented, leave holder for future to keep in sync with python implementation
+	case "kerberos":
+		encryption.protocolString = []byte("application/HTTP-SPNEGO-session-encrypted")
+		encryption.kerberos = &ClientKerberos{}
+		return encryption, nil
+		/* credssp is currently unimplemented, leave holder for future to keep in sync with python implementation
 		case "credssp":
 			encryption.protocolString = []byte("application/HTTP-CredSSP-session-encrypted")
-		case "kerberos": // kerberos is currently unimplemented, leave holder for future to keep in sync with python implementation
-			encryption.protocolString = []byte("application/HTTP-SPNEGO-session-encrypted")
 		*/
 	}
 
@@ -76,10 +80,32 @@ func NewEncryption(protocol string) (*Encryption, error) {
 
 func (e *Encryption) Transport(endpoint *Endpoint) error {
 	e.httpClient = &http.Client{}
-	return e.ntlm.Transport(endpoint)
+
+	switch e.protocol {
+	case "ntlm":
+		return e.ntlm.Transport(endpoint)
+	case "kerberos":
+		if e.kerberos == nil {
+			e.kerberos = &ClientKerberos{}
+		}
+		return e.kerberos.Transport(endpoint)
+	default:
+		return fmt.Errorf("Encryption for protocol '%s' not supported", e.protocol)
+	}
 }
 
 func (e *Encryption) Post(client *Client, message *soap.SoapMessage) (string, error) {
+	switch e.protocol {
+	case "ntlm":
+		return e.postNTLM(client, message)
+	case "kerberos":
+		return e.postKerberos(client, message)
+	default:
+		return "", fmt.Errorf("Encryption for protocol '%s' not supported", e.protocol)
+	}
+}
+
+func (e *Encryption) postNTLM(client *Client, message *soap.SoapMessage) (string, error) {
 	var userName, domain string
 	if strings.Contains(client.username, "@") {
 		parts := strings.Split(client.username, "@")
@@ -96,11 +122,105 @@ func (e *Encryption) Post(client *Client, message *soap.SoapMessage) (string, er
 	e.ntlmClient, _ = ntlmssp.NewClient(ntlmssp.SetUserInfo(userName, client.password), ntlmssp.SetDomain(domain), ntlmssp.SetVersion(ntlmssp.DefaultVersion()))
 	e.ntlmhttp, _ = ntlmhttp.NewClient(e.httpClient, e.ntlmClient)
 
-	var err error
-	if err = e.PrepareRequest(client, client.url); err == nil {
+	if err := e.PrepareRequest(client, client.url); err == nil {
 		return e.PrepareEncryptedRequest(client, client.url, []byte(message.String()))
-	} else {
-		return e.ntlm.Post(client, message)
+	}
+
+	return e.ntlm.Post(client, message)
+}
+
+func (e *Encryption) postKerberos(client *Client, message *soap.SoapMessage) (string, error) {
+	if err := e.primeKerberosClient(client); err != nil {
+		return "", err
+	}
+
+	if err := e.PrepareRequest(client, client.url); err != nil {
+		return "", fmt.Errorf("kerberos encrypted session setup failed: %w", err)
+	}
+
+	return e.PrepareEncryptedRequest(client, client.url, []byte(message.String()))
+}
+
+func (e *Encryption) primeKerberosClient(client *Client) error {
+	if e.kerberos == nil {
+		e.kerberos = &ClientKerberos{}
+	}
+
+	if e.kerberos.Username == "" {
+		e.kerberos.Username = client.username
+	}
+	if e.kerberos.Password == "" {
+		e.kerberos.Password = client.password
+	}
+
+	if e.kerberos.KrbConf == "" {
+		e.kerberos.KrbConf = "/etc/krb5.conf"
+	}
+
+	if e.kerberos.Realm == "" && strings.Contains(client.username, "@") {
+		parts := strings.Split(client.username, "@")
+		if len(parts) > 1 {
+			e.kerberos.Realm = parts[len(parts)-1]
+		}
+	}
+
+	parsedURL, err := url.Parse(client.url)
+	if err != nil {
+		return fmt.Errorf("invalid client URL for kerberos transport: %w", err)
+	}
+
+	if e.kerberos.Hostname == "" {
+		e.kerberos.Hostname = parsedURL.Hostname()
+	}
+
+	if e.kerberos.Proto == "" {
+		e.kerberos.Proto = parsedURL.Scheme
+	}
+
+	if e.kerberos.Port == 0 {
+		port := parsedURL.Port()
+		if port != "" {
+			parsedPort, err := strconv.Atoi(port)
+			if err != nil {
+				return fmt.Errorf("invalid port in client URL %q: %w", client.url, err)
+			}
+			e.kerberos.Port = parsedPort
+		} else if parsedURL.Scheme == "https" {
+			e.kerberos.Port = 5986
+		} else {
+			e.kerberos.Port = 5985
+		}
+	}
+
+	return nil
+}
+
+func (e *Encryption) doRequest(req *http.Request) (*http.Response, error) {
+	switch e.protocol {
+	case "ntlm":
+		if e.ntlmhttp == nil {
+			return nil, errors.New("ntlm encrypted transport is not initialized")
+		}
+		return e.ntlmhttp.Do(req)
+	case "kerberos":
+		if e.kerberos == nil {
+			return nil, errors.New("kerberos encrypted transport is not initialized")
+		}
+
+		context, err := e.kerberos.getOrCreateContext()
+		if err != nil {
+			return nil, err
+		}
+
+		err = spnego.SetSPNEGOHeader(context.client, req, context.spn)
+		if err != nil {
+			return nil, fmt.Errorf("unable to set SPNego Header: %w", err)
+		}
+
+		httpClient := &http.Client{Transport: e.kerberos.transport}
+		return httpClient.Do(req)
+	default:
+		return nil, fmt.Errorf("Encryption for protocol '%s' not supported", e.protocol)
 	}
 }
 
@@ -115,7 +235,7 @@ func (e *Encryption) PrepareRequest(client *Client, endpoint string) error {
 	req.Header.Set("Content-Type", "application/soap+xml;charset=UTF-8")
 	req.Header.Set("Connection", "Keep-Alive")
 
-	resp, err := e.ntlmhttp.Do(req)
+	resp, err := e.doRequest(req)
 	if err != nil {
 		return fmt.Errorf("unknown error %w", err)
 	}
@@ -161,12 +281,18 @@ func (e *Encryption) PrepareEncryptedRequest(client *Client, endpoint string, me
 			message_chunks = append(message_chunks, message[i:i+sixTenKB])
 		}
 		for _, message_chunk := range message_chunks {
-			encrypted_chunk := e.encryptMessage(message_chunk, host)
+			encrypted_chunk, err := e.encryptMessage(message_chunk, host)
+			if err != nil {
+				return "", err
+			}
 			encrypted_message = append(encrypted_message, encrypted_chunk...)
 		}
 	} else {
 		content_type = "multipart/encrypted"
-		encrypted_message = e.encryptMessage(message, host)
+		encrypted_message, err = e.encryptMessage(message, host)
+		if err != nil {
+			return "", err
+		}
 	}
 
 	encrypted_message = append(encrypted_message, []byte(mimeBoundary)...)
@@ -182,7 +308,7 @@ func (e *Encryption) PrepareEncryptedRequest(client *Client, endpoint string, me
 	req.Header.Set("Content-Length", fmt.Sprintf("%d", len(encrypted_message)))
 	req.Header.Set("Content-Type", fmt.Sprintf(`%s;protocol="%s";boundary="Encrypted Boundary"`, content_type, e.protocolString))
 
-	resp, err := e.ntlmhttp.Do(req)
+	resp, err := e.doRequest(req)
 	if err != nil {
 		return "", fmt.Errorf("unknown error %w", err)
 	}
@@ -211,8 +337,11 @@ func (e *Encryption) ParseEncryptedResponse(response *http.Response) ([]byte, er
 	return body, nil
 }
 
-func (e *Encryption) encryptMessage(message []byte, host string) []byte {
-	encryptedStream, _ := e.buildMessage(message, host)
+func (e *Encryption) encryptMessage(message []byte, host string) ([]byte, error) {
+	encryptedStream, err := e.buildMessage(message, host)
+	if err != nil {
+		return nil, err
+	}
 
 	messagePayload := bytes.Join([][]byte{
 		[]byte(mimeBoundary),
@@ -225,7 +354,7 @@ func (e *Encryption) encryptMessage(message []byte, host string) []byte {
 		encryptedStream,
 	}, []byte{})
 
-	return messagePayload
+	return messagePayload, nil
 }
 
 func deleteEmpty(b [][]byte) [][]byte {
@@ -282,11 +411,11 @@ func (e *Encryption) decryptMessage(encryptedData []byte, host string) ([]byte, 
 	switch e.protocol {
 	case "ntlm":
 		return e.decryptNtlmMessage(encryptedData, host)
-		/* credssp and kerberos is currently unimplemented, leave holder for future to keep in sync with python implementation
+	case "kerberos":
+		return e.decryptKerberosMessage(encryptedData, host)
+		/* credssp is currently unimplemented, leave holder for future to keep in sync with python implementation
 		case "credssp":
 			return e.decryptCredsspMessage(encryptedData, host)
-		case "kerberos":
-			return e.decryptKerberosMessage(encryptedData, host)
 		*/
 	default:
 		return nil, errors.New("Encryption for protocol " + e.protocol + " not supported")
@@ -305,7 +434,11 @@ func (e *Encryption) decryptNtlmMessage(encryptedData []byte, host string) ([]by
 	return message, nil
 }
 
-/* credssp and kerberos is currently unimplemented, leave holder for future to keep in sync with python implementation
+func (enc *Encryption) decryptKerberosMessage(encryptedData []byte, host string) ([]byte, error) {
+	return nil, errors.New("kerberos wrap/unwrap is not implemented yet (phase 4)")
+}
+
+/* credssp is currently unimplemented, leave holder for future to keep in sync with python implementation
 func (e *Encryption) decryptCredsspMessage(encryptedData []byte, host string) ([]byte, error) {
 	// // TODO
 	// encryptedMessage := encryptedData[4:]
@@ -321,31 +454,17 @@ func (e *Encryption) decryptCredsspMessage(encryptedData []byte, host string) ([
 	// }
 	// return message, nil
 }
-
-func (enc *Encryption) decryptKerberosMessage(encryptedData []byte, host string) ([]byte, error) {
-	// //TODO
-	// signatureLength := binary.LittleEndian.Uint32(encryptedData[0:4])
-	// signature := encryptedData[4 : 4+signatureLength]
-	// encryptedMessage := encryptedData[4+signatureLength:]
-
-	// message, err := enc.session.Auth.UnwrapWinrm(host, encryptedMessage, signature)
-	// if err != nil {
-	// 	return nil, err
-	// }
-
-	// return message, nil
-}
 */
 
 func (e *Encryption) buildMessage(encryptedData []byte, host string) ([]byte, error) {
 	switch e.protocol {
 	case "ntlm":
 		return e.buildNTLMMessage(encryptedData, host)
-		/* credssp and kerberos is currently unimplemented, leave holder for future to keep in sync with python implementation
+	case "kerberos":
+		return e.buildKerberosMessage(encryptedData, host)
+		/* credssp is currently unimplemented, leave holder for future to keep in sync with python implementation
 		case "credssp":
 			return e.buildCredSSPMessage(encryptedData, host)
-		case "kerberos":
-			return e.buildKerberosMessage(encryptedData, host)
 		*/
 	default:
 		return nil, errors.New("Encryption for protocol " + e.protocol + " not supported")
@@ -372,7 +491,11 @@ func (enc *Encryption) buildNTLMMessage(message []byte, host string) ([]byte, er
 	return buf.Bytes(), nil
 }
 
-/* credssp and kerberos is currently unimplemented, leave holder for future to keep in sync with python implementation
+func (e *Encryption) buildKerberosMessage(message []byte, host string) ([]byte, error) {
+	return nil, errors.New("kerberos wrap/unwrap is not implemented yet (phase 3)")
+}
+
+/* credssp is currently unimplemented, leave holder for future to keep in sync with python implementation
 func (e *Encryption) buildCredSSPMessage(message []byte, host string) ([]byte, error) {
 	// //TODO
 	// context := e.session.Auth.Contexts[host]
@@ -386,17 +509,6 @@ func (e *Encryption) buildCredSSPMessage(message []byte, host string) ([]byte, e
 
 	// return append(trailer, sealedMessage...), nil
 }
-
-func (e *Encryption) buildKerberosMessage(message []byte, host string) ([]byte, error) {
-	// //TODO
-	// sealedMessage, signature := e.session.Auth.WrapWinrm(host, message)
-
-	// signatureLength := make([]byte, 4)
-	// binary.LittleEndian.PutUint32(signatureLength, uint32(len(signature)))
-
-	// return append(append(signatureLength, signature...), sealedMessage...), nil
-}
-
 func (e *Encryption) getCredSSPTrailerLength(messageLength int, cipherSuite string) int {
 	var trailerLength int
 
