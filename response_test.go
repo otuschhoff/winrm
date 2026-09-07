@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"strings"
+	"testing"
 
 	. "gopkg.in/check.v1"
 )
@@ -116,4 +117,35 @@ func (s *WinRMSuite) TestSlurpOutputRejectsMalformedData(c *C) {
 	invalidExit := strings.Replace(doneCommandResponse, "<rsp:ExitCode>123</rsp:ExitCode>", "<rsp:ExitCode>invalid</rsp:ExitCode>", 1)
 	_, _, err = ParseSlurpOutputErrResponse(invalidExit, io.Discard, io.Discard)
 	c.Assert(err, ErrorMatches, ".*parse command exit code.*")
+}
+
+func (s *WinRMSuite) TestSlurpSingleOutputRejectsMalformedXML(c *C) {
+	_, _, err := ParseSlurpOutputResponse("<not-closed", io.Discard, "stdout")
+	c.Assert(err, NotNil)
+}
+
+func FuzzParseCommandResponses(f *testing.F) {
+	f.Add(createShellResponse)
+	f.Add(executeCommandResponseWithError)
+	f.Add("<not-closed")
+	f.Fuzz(func(t *testing.T, response string) {
+		if len(response) > 1<<20 {
+			t.Skip()
+		}
+		_, _ = ParseOpenShellResponse(response)
+		_, _ = ParseExecuteCommandResponse(response)
+	})
+}
+
+func FuzzParseOutputResponses(f *testing.F) {
+	f.Add(outputResponse, "stdout")
+	f.Add(doneCommandResponse, "stderr")
+	f.Add("<not-closed", "stdout")
+	f.Fuzz(func(t *testing.T, response, stream string) {
+		if len(response) > 1<<20 || len(stream) > 32 {
+			t.Skip()
+		}
+		_, _, _ = ParseSlurpOutputErrResponse(response, io.Discard, io.Discard)
+		_, _, _ = ParseSlurpOutputResponse(response, io.Discard, stream)
+	})
 }

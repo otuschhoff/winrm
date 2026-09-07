@@ -161,6 +161,9 @@ func ParseSlurpOutputResponse(response string, stream io.Writer, streamType stri
 	)
 
 	doc, err := xmltree.ParseXML(strings.NewReader(response))
+	if err != nil {
+		return false, 0, err
+	}
 
 	nodes, _ := xPath(doc, fmt.Sprintf("//rsp:Stream[@Name='%s']", streamType))
 	for _, node := range nodes {
