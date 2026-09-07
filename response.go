@@ -124,13 +124,15 @@ func ParseSlurpOutputErrResponse(response string, stdout, stderr io.Writer) (boo
 
 	stdouts, _ := xPath(doc, "//rsp:Stream[@Name='stdout']")
 	for _, node := range stdouts {
-		content, _ := base64.StdEncoding.DecodeString(node.ResValue())
-		stdout.Write(content)
+		if err := writeOutputStream(stdout, "stdout", node.ResValue()); err != nil {
+			return false, 0, err
+		}
 	}
 	stderrs, _ := xPath(doc, "//rsp:Stream[@Name='stderr']")
 	for _, node := range stderrs {
-		content, _ := base64.StdEncoding.DecodeString(node.ResValue())
-		stderr.Write(content)
+		if err := writeOutputStream(stderr, "stderr", node.ResValue()); err != nil {
+			return false, 0, err
+		}
 	}
 
 	ended, _ := any(doc, "//*[@State='http://schemas.microsoft.com/wbem/wsman/1/windows/shell/CommandState/Done']")
@@ -139,7 +141,10 @@ func ParseSlurpOutputErrResponse(response string, stdout, stderr io.Writer) (boo
 		finished = ended
 		if exitBool, _ := any(doc, "//rsp:ExitCode"); exitBool {
 			exit, _ := first(doc, "//rsp:ExitCode")
-			exitCode, _ = strconv.Atoi(exit)
+			exitCode, err = strconv.Atoi(exit)
+			if err != nil {
+				return false, 0, fmt.Errorf("parse command exit code %q: %w", exit, err)
+			}
 		}
 	} else {
 		finished = false
@@ -159,8 +164,9 @@ func ParseSlurpOutputResponse(response string, stream io.Writer, streamType stri
 
 	nodes, _ := xPath(doc, fmt.Sprintf("//rsp:Stream[@Name='%s']", streamType))
 	for _, node := range nodes {
-		content, _ := base64.StdEncoding.DecodeString(node.ResValue())
-		_, _ = stream.Write(content)
+		if err := writeOutputStream(stream, streamType, node.ResValue()); err != nil {
+			return false, 0, err
+		}
 	}
 
 	ended, _ := any(doc, "//*[@State='http://schemas.microsoft.com/wbem/wsman/1/windows/shell/CommandState/Done']")
@@ -169,11 +175,29 @@ func ParseSlurpOutputResponse(response string, stream io.Writer, streamType stri
 		finished = ended
 		if exitBool, _ := any(doc, "//rsp:ExitCode"); exitBool {
 			exit, _ := first(doc, "//rsp:ExitCode")
-			exitCode, _ = strconv.Atoi(exit)
+			exitCode, err = strconv.Atoi(exit)
+			if err != nil {
+				return false, 0, fmt.Errorf("parse command exit code %q: %w", exit, err)
+			}
 		}
 	} else {
 		finished = false
 	}
 
 	return finished, exitCode, err
+}
+
+func writeOutputStream(writer io.Writer, stream, encoded string) error {
+	content, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return fmt.Errorf("decode %s stream: %w", stream, err)
+	}
+	written, err := writer.Write(content)
+	if err != nil {
+		return fmt.Errorf("write %s stream: %w", stream, err)
+	}
+	if written != len(content) {
+		return fmt.Errorf("write %s stream: %w", stream, io.ErrShortWrite)
+	}
+	return nil
 }

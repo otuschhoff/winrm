@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"regexp"
 	"runtime"
 	"runtime/debug"
@@ -20,19 +21,34 @@ import (
 )
 
 type kerberosComparisonResult struct {
-	Client         string `json:"client"`
-	Success        bool   `json:"success"`
-	ExitCode       int    `json:"exit_code"`
-	Stdout         string `json:"stdout"`
-	Stderr         string `json:"stderr"`
-	HTTPStatus     int    `json:"http_status"`
-	ErrorKind      string `json:"error_kind"`
-	Error          string `json:"error"`
-	Endpoint       string `json:"endpoint"`
-	ProtectionMode string `json:"protection_mode"`
-	RuntimeVersion string `json:"runtime_version"`
-	ClientVersion  string `json:"client_version"`
-	Outcome        string `json:"outcome"`
+	Client         string                  `json:"client"`
+	Success        bool                    `json:"success"`
+	ExitCode       int                     `json:"exit_code"`
+	Stdout         string                  `json:"stdout"`
+	Stderr         string                  `json:"stderr"`
+	HTTPStatus     int                     `json:"http_status"`
+	ErrorKind      string                  `json:"error_kind"`
+	Error          string                  `json:"error"`
+	Endpoint       string                  `json:"endpoint"`
+	ProtectionMode string                  `json:"protection_mode"`
+	RuntimeVersion string                  `json:"runtime_version"`
+	ClientVersion  string                  `json:"client_version"`
+	Outcome        string                  `json:"outcome"`
+	Results        []kerberosCommandResult `json:"results,omitempty"`
+}
+
+type kerberosCommandScenario struct {
+	Name      string `json:"name"`
+	Command   string `json:"command"`
+	Stdin     string `json:"stdin,omitempty"`
+	SendStdin bool   `json:"send_stdin,omitempty"`
+}
+
+type kerberosCommandResult struct {
+	Name     string `json:"name"`
+	Stdout   string `json:"stdout"`
+	Stderr   string `json:"stderr"`
+	ExitCode int    `json:"exit_code"`
 }
 
 func TestKerberosIntegration(t *testing.T) {
@@ -73,6 +89,27 @@ func TestKerberosComparisonWithPywinrm(t *testing.T) {
 	assertComparisonResult(t, pythonResult, expectedHostname)
 	if goResult.ExitCode != pythonResult.ExitCode || !strings.EqualFold(goResult.Stdout, pythonResult.Stdout) {
 		t.Fatalf("clients returned different successful command results: Go=%s Python=%s", sanitizedOutcome(goResult), sanitizedOutcome(pythonResult))
+	}
+}
+
+func TestKerberosPhase4ComparisonWithPywinrm(t *testing.T) {
+	if os.Getenv("WINRM_KERBEROS_PHASE4_COMPARISON") != "1" {
+		t.Skip("set WINRM_KERBEROS_PHASE4_COMPARISON=1 to compare command/session behavior with pywinrm")
+	}
+
+	host, realm, expectedHostname := kerberosIntegrationTarget(t)
+	requirePasswordMode(t)
+	username, password := passwordTestCredentials(t, realm)
+	scenarios := kerberosPhase4Scenarios()
+	goResult := runGoKerberosPhase4Comparison(host, realm, username, password, scenarios)
+	pythonResult := runPywinrmPhase4Comparison(t, host, username+"@"+realm, scenarios)
+	if !goResult.Success || !pythonResult.Success {
+		t.Fatalf("Phase 4 parity requires both clients to succeed: Go=%s Python=%s", sanitizedOutcome(goResult), sanitizedOutcome(pythonResult))
+	}
+	assertKerberosPhase4Results(t, goResult.Results, expectedHostname)
+	assertKerberosPhase4Results(t, pythonResult.Results, expectedHostname)
+	if !reflect.DeepEqual(goResult.Results, pythonResult.Results) {
+		t.Fatalf("Phase 4 command results differ between Go and Python")
 	}
 }
 
@@ -153,6 +190,108 @@ func runGoKerberosComparison(host, realm, username, password, keytabPath string)
 		result.ErrorKind = "transport"
 	}
 	return result
+}
+
+func kerberosPhase4Scenarios() []kerberosCommandScenario {
+	return []kerberosCommandScenario{
+		{Name: "hostname-1", Command: "hostname"},
+		{Name: "hostname-2", Command: "hostname"},
+		{Name: "streams-and-exit", Command: `cmd.exe /d /s /c "(echo phase4-out)&(>&2 echo phase4-err)&exit /b 23"`},
+		{Name: "powershell-unicode", Command: Powershell(`[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); [Console]::Write('phase4-日本語-€')`)},
+		{Name: "stdin", Command: Powershell(`[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new(); [Console]::Write([Console]::In.ReadToEnd())`), Stdin: "phase4-stdin\r\n", SendStdin: true},
+		{Name: "large-output", Command: Powershell(`[Console]::Write('x' * 200000)`)},
+	}
+}
+
+func runGoKerberosPhase4Comparison(host, realm, username, password string, scenarios []kerberosCommandScenario) kerberosComparisonResult {
+	result := newGoComparisonResult(host)
+	endpoint := NewEndpoint(host, 5985, false, false, nil, nil, nil, 15*time.Second)
+	params := *DefaultParameters
+	params.TransportDecorator = func() Transporter {
+		return &ClientKerberos{
+			Username: username, Password: password, Realm: realm,
+			Hostname: host, Port: 5985, Proto: "http", SPN: "HTTP/" + host,
+			KrbConf: envOrDefault("WINRM_KRB_CONFIG", "/etc/krb5.conf"),
+		}
+	}
+	client, err := NewClientWithParameters(endpoint, username, password, &params)
+	if err != nil {
+		result.ErrorKind, result.Error = "setup", err.Error()
+		return result
+	}
+	defer client.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	defer cancel()
+	for _, scenario := range scenarios {
+		var stdout, stderr string
+		var exitCode int
+		if scenario.SendStdin {
+			stdout, stderr, exitCode, err = client.RunWithContextWithString(ctx, scenario.Command, scenario.Stdin)
+		} else {
+			stdout, stderr, exitCode, err = client.RunCmdWithContext(ctx, scenario.Command)
+		}
+		if err != nil {
+			result.ErrorKind, result.Error = "command", err.Error()
+			return result
+		}
+		result.Results = append(result.Results, kerberosCommandResult{
+			Name: scenario.Name, Stdout: stdout, Stderr: stderr, ExitCode: exitCode,
+		})
+	}
+	result.Success = true
+	result.Outcome = "success"
+	return result
+}
+
+func runPywinrmPhase4Comparison(t *testing.T, host, principal string, scenarios []kerberosCommandScenario) kerberosComparisonResult {
+	t.Helper()
+	encodedScenarios, err := json.Marshal(scenarios)
+	if err != nil {
+		t.Fatal(err)
+	}
+	python := envOrDefault("WINRM_PYTHON", "python3")
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+	command := exec.CommandContext(ctx, python, filepath.Join("development", "compare_pywinrm.py"))
+	command.Env = mergeEnvironment(os.Environ(), map[string]string{
+		"KRB5_CONFIG":             envOrDefault("WINRM_KRB_CONFIG", "/etc/krb5.conf"),
+		"WINRM_HOST":              host,
+		"WINRM_KRB_AUTH":          "password",
+		"WINRM_KRB_PASSWORD_FILE": envOrDefault("WINRM_KRB_PASSWORD_FILE", "pw"),
+		"WINRM_KRB_PRINCIPAL":     principal,
+		"WINRM_KRB_SCENARIOS":     string(encodedScenarios),
+	})
+	output, err := command.Output()
+	if err != nil {
+		t.Fatalf("run pywinrm Phase 4 comparison: %v", err)
+	}
+	var result kerberosComparisonResult
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatalf("decode pywinrm Phase 4 result: %v", err)
+	}
+	return result
+}
+
+func assertKerberosPhase4Results(t *testing.T, results []kerberosCommandResult, expectedHostname string) {
+	t.Helper()
+	if len(results) != 6 {
+		t.Fatalf("got %d Phase 4 results, want 6", len(results))
+	}
+	for index := 0; index < 2; index++ {
+		assertHostnameResult(t, results[index].Stdout, results[index].Stderr, results[index].ExitCode, expectedHostname)
+	}
+	if result := results[2]; result.ExitCode != 23 || trimTerminalLineEnding(result.Stdout) != "phase4-out" || trimTerminalLineEnding(result.Stderr) != "phase4-err" {
+		t.Fatalf("streams-and-exit result is invalid: exit=%d stdout=%q stderr=%q", result.ExitCode, result.Stdout, result.Stderr)
+	}
+	if result := results[3]; result.ExitCode != 0 || result.Stdout != "phase4-日本語-€" || result.Stderr != "" {
+		t.Fatalf("PowerShell Unicode result is invalid: exit=%d stdout=%q stderr=%q", result.ExitCode, result.Stdout, result.Stderr)
+	}
+	if result := results[4]; result.ExitCode != 0 || !strings.Contains(result.Stdout, "phase4-stdin") || result.Stderr != "" {
+		t.Fatalf("stdin result is invalid: exit=%d stdout=%q stderr=%q", result.ExitCode, result.Stdout, result.Stderr)
+	}
+	if result := results[5]; result.ExitCode != 0 || len(result.Stdout) != 200000 || strings.Trim(result.Stdout, "x") != "" || result.Stderr != "" {
+		t.Fatalf("large-output result is invalid: exit=%d stdout-bytes=%d stderr=%q", result.ExitCode, len(result.Stdout), result.Stderr)
+	}
 }
 
 func newGoComparisonResult(host string) kerberosComparisonResult {

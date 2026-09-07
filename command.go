@@ -8,7 +8,10 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"time"
 )
+
+const commandCleanupTimeout = 5 * time.Second
 
 type commandWriter struct {
 	*Command
@@ -27,6 +30,7 @@ type commandReader struct {
 // to the various stdout, stderr and stdin pipes.
 type Command struct {
 	ctx      context.Context
+	cancelFn context.CancelFunc
 	client   *Client
 	shell    *Shell
 	id       string
@@ -37,20 +41,30 @@ type Command struct {
 	Stdout *commandReader
 	Stderr *commandReader
 
-	done   chan struct{}
-	cancel chan struct{}
+	done      chan struct{}
+	doneOnce  sync.Once
+	startOnce sync.Once
+	stateMu   sync.RWMutex
+	signalMu  sync.Mutex
+	signaled  bool
+	signalErr error
 }
 
-func newCommand(ctx context.Context, shell *Shell, ids string) *Command {
+func newCommand(ctx context.Context, shell *Shell, ids string) (*Command, error) {
+	return newCommandWithOutput(ctx, shell, ids, true)
+}
+
+func newCommandWithOutput(ctx context.Context, shell *Shell, ids string, startOutput bool) (*Command, error) {
+	commandContext, cancel := context.WithCancel(ctx)
 	command := &Command{
-		ctx:      ctx,
+		ctx:      commandContext,
+		cancelFn: cancel,
 		shell:    shell,
 		client:   shell.client,
 		id:       ids,
 		exitCode: 0,
 		err:      nil,
 		done:     make(chan struct{}),
-		cancel:   make(chan struct{}),
 	}
 
 	command.Stdout = newCommandReader("stdout", command)
@@ -59,10 +73,22 @@ func newCommand(ctx context.Context, shell *Shell, ids string) *Command {
 		eof:     false,
 	}
 	command.Stderr = newCommandReader("stderr", command)
+	if err := command.client.registerCommand(command); err != nil {
+		cancel()
+		return nil, err
+	}
 
-	go fetchOutput(ctx, command)
+	if startOutput {
+		command.startOutput()
+	}
 
-	return command
+	return command, nil
+}
+
+func (c *Command) startOutput() {
+	c.startOnce.Do(func() {
+		go fetchOutput(c.ctx, c)
+	})
 }
 
 func newCommandReader(stream string, command *Command) *commandReader {
@@ -76,29 +102,40 @@ func newCommandReader(stream string, command *Command) *commandReader {
 }
 
 func fetchOutput(ctx context.Context, command *Command) {
-	ctxDone := ctx.Done()
 	for {
-		select {
-		case <-command.cancel:
-			_, _ = command.slurpAllOutput()
-			err := errors.New("canceled")
-			command.Stderr.write.CloseWithError(err)
-			command.Stdout.write.CloseWithError(err)
-			close(command.done)
+		if err := ctx.Err(); err != nil {
+			command.cleanupAfterCancellation(err)
 			return
-		case <-ctxDone:
-			command.err = ctx.Err()
-			ctxDone = nil
-			command.Close()
-		default:
-			finished, err := command.slurpAllOutput()
-			if finished {
-				command.err = err
-				close(command.done)
-				return
-			}
+		}
+		finished, err := command.slurpAllOutput()
+		if contextErr := ctx.Err(); contextErr != nil {
+			command.cleanupAfterCancellation(contextErr)
+			return
+		}
+		if finished {
+			command.finish(err)
+			return
 		}
 	}
+}
+
+func (c *Command) cleanupAfterCancellation(cause error) {
+	cleanupContext, cancel := context.WithTimeout(context.Background(), commandCleanupTimeout)
+	defer cancel()
+	_ = c.signal(cleanupContext)
+	c.finish(cause)
+}
+
+func (c *Command) finish(err error) {
+	c.doneOnce.Do(func() {
+		c.stateMu.Lock()
+		c.err = err
+		c.stateMu.Unlock()
+		_ = c.Stderr.write.CloseWithError(err)
+		_ = c.Stdout.write.CloseWithError(err)
+		c.client.unregisterCommand(c)
+		close(c.done)
+	})
 }
 
 func (c *Command) check() error {
@@ -116,21 +153,31 @@ func (c *Command) check() error {
 
 // Close will terminate the running command
 func (c *Command) Close() error {
+	ctx, cancel := context.WithTimeout(context.Background(), commandCleanupTimeout)
+	defer cancel()
+	return c.CloseWithContext(ctx)
+}
+
+// CloseWithContext terminates the remote command with bounded cleanup.
+func (c *Command) CloseWithContext(ctx context.Context) error {
 	if err := c.check(); err != nil {
 		return err
 	}
+	c.cancelFn()
+	return c.signal(ctx)
+}
 
-	select { // close cancel channel if it's still open
-	case <-c.cancel:
-	default:
-		close(c.cancel)
+func (c *Command) signal(ctx context.Context) error {
+	c.signalMu.Lock()
+	defer c.signalMu.Unlock()
+	if c.signaled {
+		return c.signalErr
 	}
-
+	c.signaled = true
 	request := NewSignalRequest(c.client.url, c.shell.id, c.id, &c.client.Parameters)
 	defer request.Free()
-
-	_, err := c.client.sendRequest(request)
-	return err
+	_, c.signalErr = c.client.sendRequestContext(ctx, request)
+	return c.signalErr
 }
 
 func (c *Command) slurpAllOutput() (bool, error) {
@@ -155,7 +202,9 @@ func (c *Command) slurpAllOutput() (bool, error) {
 			return false, err
 		}
 		if strings.Contains(err.Error(), "EOF") {
+			c.stateMu.Lock()
 			c.exitCode = 16001
+			c.stateMu.Unlock()
 		}
 
 		c.Stderr.write.CloseWithError(err)
@@ -178,7 +227,9 @@ func (c *Command) slurpAllOutput() (bool, error) {
 		_, _ = c.Stderr.write.Write(stderr.Bytes())
 	}
 	if finished {
+		c.stateMu.Lock()
 		c.exitCode = exitCode
+		c.stateMu.Unlock()
 		_ = c.Stderr.write.Close()
 		_ = c.Stdout.write.Close()
 	}
@@ -200,11 +251,15 @@ func (c *Command) sendInput(data []byte, eof bool) error {
 
 // ExitCode returns command exit code when it is finished. Before that the result is always 0.
 func (c *Command) ExitCode() int {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
 	return c.exitCode
 }
 
 // Error returns command execution error if any
 func (c *Command) Error() error {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
 	return c.err
 }
 
@@ -219,9 +274,16 @@ func (c *Command) Wait() {
 func (w *commandWriter) Write(data []byte) (int, error) {
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
+	return w.write(data, false)
+}
 
+func (w *commandWriter) write(data []byte, eof bool) (int, error) {
 	if w.eof {
 		return 0, io.ErrClosedPipe
+	}
+	chunkSize := w.client.Parameters.EnvelopeSize - 1000
+	if chunkSize <= 0 {
+		return 0, errors.New("envelope size is too small for command input")
 	}
 
 	var (
@@ -231,12 +293,19 @@ func (w *commandWriter) Write(data []byte) (int, error) {
 	origLen := len(data)
 	for len(data) > 0 {
 		// never send more data than our EnvelopeSize.
-		n := min(w.client.Parameters.EnvelopeSize-1000, len(data))
-		if err := w.sendInput(data[:n], false); err != nil {
+		n := min(chunkSize, len(data))
+		last := n == len(data)
+		if err = w.sendInput(data[:n], eof && last); err != nil {
 			break
 		}
 		data = data[n:]
 		written += n
+	}
+	if eof && origLen == 0 {
+		err = w.sendInput(nil, true)
+	}
+	if eof && err == nil {
+		w.eof = true
 	}
 
 	// signal that we couldn't write all data
@@ -249,8 +318,9 @@ func (w *commandWriter) Write(data []byte) (int, error) {
 
 // Write data to this Pipe and mark EOF
 func (w *commandWriter) WriteClose(data []byte) (int, error) {
-	w.eof = true
-	return w.Write(data)
+	w.mutex.Lock()
+	defer w.mutex.Unlock()
+	return w.write(data, true)
 }
 
 func min(a int, b int) int {

@@ -369,6 +369,51 @@ func TestKerberosSessionEncryptedResponseHandling(t *testing.T) {
 	}
 }
 
+type expiredKerberosContext struct {
+	gssapi.Context
+}
+
+func (expiredKerberosContext) Wrap([]byte, bool) ([]byte, error) {
+	return nil, errors.New("Kerberos security context expired")
+}
+
+func TestKerberosSessionExpiredContextReauthenticatesWithoutReplay(t *testing.T) {
+	firstConnection := &fixtureConnection{id: "expired"}
+	secondConnection := &fixtureConnection{id: "renewed"}
+	transport := &scriptedKerberosTransport{steps: []kerberosHTTPFixture{
+		{status: http.StatusOK, connection: firstConnection},
+		{status: http.StatusOK, connection: secondConnection},
+	}}
+	factoryCalls := 0
+	session := newFixtureKerberosSession(transport, func(client *http.Client) kerberosNegotiator {
+		factoryCalls++
+		securityContext := fixtureSecurityContext(t)
+		if factoryCalls == 1 {
+			securityContext = expiredKerberosContext{Context: securityContext}
+		}
+		return &fixtureKerberosNegotiator{client: client, rounds: 1, context: securityContext}
+	})
+	session.requireEncryption = true
+
+	if _, err := session.post(context.Background(), "<must-not-replay/>", 1024); err == nil || !strings.Contains(err.Error(), "expired") {
+		t.Fatalf("expired context error = %v", err)
+	}
+	if session.state != kerberosSessionInvalid || transport.calls() != 1 {
+		t.Fatalf("expired state/calls = %d/%d, want invalid/1", session.state, transport.calls())
+	}
+	if err := session.establishForTest(); err != nil {
+		t.Fatal(err)
+	}
+	if session.state != kerberosSessionEstablished || session.connection != secondConnection || factoryCalls != 2 || transport.calls() != 2 {
+		t.Fatalf("renewed state/connection/factory/calls = %d/%v/%d/%d", session.state, session.connection, factoryCalls, transport.calls())
+	}
+	for index, body := range transport.bodies() {
+		if body != "" {
+			t.Fatalf("bootstrap request %d replayed SOAP body %q", index, body)
+		}
+	}
+}
+
 func TestKerberosBoundedReadCloserReportsBytesWrittenOnOverflow(t *testing.T) {
 	body := io.NopCloser(strings.NewReader("12345"))
 	reader := &kerberosBoundedReadCloser{reader: body, closer: body, remaining: 4}

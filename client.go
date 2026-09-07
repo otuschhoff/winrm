@@ -16,11 +16,14 @@ import (
 // Client struct
 type Client struct {
 	Parameters
-	username string
-	password string
-	useHTTPS bool
-	url      string
-	http     Transporter
+	username       string
+	password       string
+	useHTTPS       bool
+	url            string
+	http           Transporter
+	lifecycleMu    sync.Mutex
+	activeCommands map[*Command]struct{}
+	closed         bool
 }
 
 // Transporter does different transporters
@@ -125,10 +128,57 @@ func (c *Client) sendRequestContext(ctx context.Context, request *soap.SoapMessa
 
 // Close releases resources held by transports that require explicit cleanup.
 func (c *Client) Close() error {
-	if transport, ok := c.http.(closeTransporter); ok {
-		return transport.Close()
+	c.lifecycleMu.Lock()
+	if c.closed {
+		c.lifecycleMu.Unlock()
+		return nil
 	}
+	c.closed = true
+	commands := make([]*Command, 0, len(c.activeCommands))
+	for command := range c.activeCommands {
+		commands = append(commands, command)
+	}
+	c.lifecycleMu.Unlock()
+
+	for _, command := range commands {
+		command.cancelFn()
+	}
+	cleanupContext, cancel := context.WithTimeout(context.Background(), commandCleanupTimeout)
+	defer cancel()
+	var cleanupErr error
+	for _, command := range commands {
+		select {
+		case <-command.done:
+		case <-cleanupContext.Done():
+			cleanupErr = fmt.Errorf("close client commands: %w", cleanupContext.Err())
+		}
+		if cleanupErr != nil {
+			break
+		}
+	}
+	if transport, ok := c.http.(closeTransporter); ok {
+		return errors.Join(cleanupErr, transport.Close())
+	}
+	return cleanupErr
+}
+
+func (c *Client) registerCommand(command *Command) error {
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	if c.closed {
+		return errors.New("WinRM client is closed")
+	}
+	if c.activeCommands == nil {
+		c.activeCommands = make(map[*Command]struct{})
+	}
+	c.activeCommands[command] = struct{}{}
 	return nil
+}
+
+func (c *Client) unregisterCommand(command *Command) {
+	c.lifecycleMu.Lock()
+	delete(c.activeCommands, command)
+	c.lifecycleMu.Unlock()
 }
 
 // Run will run command on the the remote host, writing the process stdout and stderr to
@@ -227,6 +277,7 @@ func (c *Client) RunWithInput(command string, stdout, stderr io.Writer, stdin io
 // Warning stdin (not stdout/stderr) are bufferized, which means reading only one byte in stdin will
 // send a winrm http packet to the remote host. If stdin is a pipe, it might be better for
 // performance reasons to buffer it.
+// A stdin reader that can block indefinitely should implement io.Closer so cancellation can interrupt its Read.
 // If stdin is nil, this is equivalent to c.RunWithContext()
 func (c *Client) RunWithContextWithInput(ctx context.Context, command string, stdout, stderr io.Writer, stdin io.Reader) (int, error) {
 	shell, err := c.CreateShellWithContext(ctx)
@@ -234,38 +285,75 @@ func (c *Client) RunWithContextWithInput(ctx context.Context, command string, st
 		return 1, err
 	}
 	defer shell.Close()
-	cmd, err := shell.ExecuteWithContext(ctx, command)
+	cmd, err := shell.executeWithContext(ctx, command, stdin == nil)
 	if err != nil {
 		return 1, err
 	}
 
-	var wg sync.WaitGroup
-	wg.Add(3)
+	var outputWG sync.WaitGroup
+	outputWG.Add(2)
+	outputErrors := make(chan error, 2)
+	inputDone := make(chan error, 1)
+	inputFinished := false
+	var inputErr error
 
 	go func() {
-		defer func() {
-			wg.Done()
-		}()
 		if stdin == nil {
+			inputDone <- nil
 			return
 		}
-		defer func() {
-			cmd.Stdin.Close()
-		}()
-		_, _ = io.Copy(cmd.Stdin, stdin)
+		_, copyErr := io.Copy(cmd.Stdin, stdin)
+		inputDone <- errors.Join(copyErr, cmd.Stdin.Close())
+	}()
+	if stdin != nil {
+		select {
+		case inputErr = <-inputDone:
+			inputFinished = true
+			if inputErr != nil {
+				cmd.cancelFn()
+				cmd.cleanupAfterCancellation(inputErr)
+			} else {
+				cmd.startOutput()
+			}
+		case <-ctx.Done():
+			if closer, ok := stdin.(io.Closer); ok {
+				_ = closer.Close()
+				inputErr = <-inputDone
+				inputFinished = true
+			}
+			cmd.cleanupAfterCancellation(ctx.Err())
+		}
+	}
+	go func() {
+		defer outputWG.Done()
+		_, err := io.Copy(stdout, cmd.Stdout)
+		outputErrors <- err
 	}()
 	go func() {
-		defer wg.Done()
-		_, _ = io.Copy(stdout, cmd.Stdout)
-	}()
-	go func() {
-		defer wg.Done()
-		_, _ = io.Copy(stderr, cmd.Stderr)
+		defer outputWG.Done()
+		_, err := io.Copy(stderr, cmd.Stderr)
+		outputErrors <- err
 	}()
 
 	cmd.Wait()
-	wg.Wait()
-	cmd.Close()
+	if closer, ok := stdin.(io.Closer); ok && !inputFinished {
+		_ = closer.Close()
+		inputErr = <-inputDone
+		inputFinished = true
+	} else {
+		select {
+		case inputErr = <-inputDone:
+			inputFinished = true
+		default:
+		}
+	}
+	outputWG.Wait()
+	close(outputErrors)
+	var outputErr error
+	for err := range outputErrors {
+		outputErr = errors.Join(outputErr, err)
+	}
+	_ = cmd.Close()
 
-	return cmd.ExitCode(), cmd.err
+	return cmd.ExitCode(), errors.Join(cmd.Error(), inputErr, outputErr)
 }

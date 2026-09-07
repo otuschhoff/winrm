@@ -216,6 +216,18 @@ WINRM_KERBEROS_COMPARISON=1 WINRM_KRB_AUTH=password \
   go test -count=1 -run '^TestKerberosComparisonWithPywinrm$' -v .
 ```
 
+Run the Phase 4 command/session gate to compare repeated cmd commands,
+PowerShell Unicode, separate stdout/stderr, a nonzero exit status, stdin, and
+200 KB output through one persistent session in each client:
+
+```sh
+WINRM_KERBEROS_PHASE4_COMPARISON=1 WINRM_KRB_AUTH=password \
+  WINRM_KRB_CONFIG=/etc/krb5.conf \
+  WINRM_PYTHON=.venv/bin/python \
+  CGO_ENABLED=0 go test -count=1 \
+  -run '^TestKerberosPhase4ComparisonWithPywinrm$' -v .
+```
+
 Run the independently passing pywinrm baseline with HTTP-SPNEGO message
 encryption enabled automatically:
 
