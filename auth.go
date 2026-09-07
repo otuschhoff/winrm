@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/masterzen/winrm/soap"
+	"github.com/otuschhoff/winrm/soap"
 )
 
 // ClientAuthRequest ClientAuthRequest

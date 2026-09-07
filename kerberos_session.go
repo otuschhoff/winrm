@@ -167,6 +167,7 @@ func (session *kerberosSession) post(ctx context.Context, message string, maxPla
 }
 
 func (session *kerberosSession) postEncryptedLocked(ctx context.Context, message string, maxPlaintextSize int) (string, error) {
+	exchangeID := nextWinRMCaptureExchangeID()
 	framer, err := newKerberosMessageFramer(maxPlaintextSize)
 	if err != nil {
 		return "", &KerberosError{Stage: "config", Err: err}
@@ -181,15 +182,20 @@ func (session *kerberosSession) postEncryptedLocked(ctx context.Context, message
 		return "", &KerberosError{Stage: "config", Err: err}
 	}
 	request.Header.Set("Content-Type", contentType)
+	debugSOAPPayload("request", "encrypted", []byte(message))
+	emitWinRMCaptureRecord(exchangeID, "request", "encrypted", "unencrypted_payload", []byte(message), request, 0, kerberosSOAPContentType, nil)
+	emitWinRMCaptureRecord(exchangeID, "request", "encrypted", "final_packet", body, request, 0, contentType, request.Header)
 	tracker := &kerberosConnectionTracker{expected: session.connection}
 	request = request.WithContext(httptrace.WithClientTrace(request.Context(), tracker.trace()))
 	response, err := session.httpClient.Do(request)
+	debugHTTPRoundTrip(request, response, err)
 	if err != nil {
 		session.invalidateLocked()
 		return "", &KerberosError{Stage: "http", Err: err}
 	}
 	responseLimit := maxPlaintextSize + kerberosMaxWrapOverhead + kerberosMaxMetadataSize
 	encryptedBody, readErr := readBoundedBody(response.Body, responseLimit)
+	emitWinRMCaptureRecord(exchangeID, "response", "encrypted", "final_packet", encryptedBody, request, response.StatusCode, response.Header.Get("Content-Type"), response.Header)
 	connection, changed := tracker.result()
 	if connection == nil || changed {
 		session.invalidateLocked()
@@ -204,6 +210,8 @@ func (session *kerberosSession) postEncryptedLocked(ctx context.Context, message
 		session.invalidateLocked()
 		return "", &KerberosError{Stage: "unwrap", StatusCode: response.StatusCode, Err: err}
 	}
+	debugSOAPPayload("response", "encrypted", plaintext)
+	emitWinRMCaptureRecord(exchangeID, "response", "encrypted", "unencrypted_payload", plaintext, request, response.StatusCode, kerberosSOAPContentType, response.Header)
 	return string(plaintext), nil
 }
 
@@ -219,6 +227,7 @@ func (session *kerberosSession) establishLocked(ctx context.Context) error {
 	clientCopy := *session.httpClient
 	clientCopy.Transport = counting
 	for counting.remaining > 0 {
+		exchangeID := nextWinRMCaptureExchangeID()
 		counting.resetAuthenticatedConnection()
 		request, err := http.NewRequestWithContext(ctx, http.MethodPost, session.endpoint, nil)
 		if err != nil {
@@ -226,16 +235,24 @@ func (session *kerberosSession) establishLocked(ctx context.Context) error {
 			return &KerberosError{Stage: "config", Err: err}
 		}
 		request.Header.Set("Content-Type", soapXML+";charset=UTF-8")
+		emitWinRMCaptureRecord(exchangeID, "request", "bootstrap", "unencrypted_payload", nil, request, 0, request.Header.Get("Content-Type"), request.Header)
+		emitWinRMCaptureRecord(exchangeID, "request", "bootstrap", "final_packet", nil, request, 0, request.Header.Get("Content-Type"), request.Header)
 		negotiator := session.newNegotiator(&clientCopy)
 		response, err := negotiator.Do(request)
+		debugHTTPRoundTrip(request, response, err)
 		if err != nil {
+			if response != nil {
+				emitWinRMCaptureRecord(exchangeID, "response", "bootstrap", "final_packet", nil, request, response.StatusCode, response.Header.Get("Content-Type"), response.Header)
+			}
 			if response != nil && response.Body != nil {
 				response.Body.Close()
 			}
 			session.state = kerberosSessionInvalid
 			return &KerberosError{Stage: "negotiate", Err: err}
 		}
-		bodyErr := discardBoundedBody(response.Body, kerberosMaxBootstrapBody)
+		bootstrapBody, bodyErr := readBoundedBody(response.Body, kerberosMaxBootstrapBody)
+		emitWinRMCaptureRecord(exchangeID, "response", "bootstrap", "final_packet", bootstrapBody, request, response.StatusCode, response.Header.Get("Content-Type"), response.Header)
+		emitWinRMCaptureRecord(exchangeID, "response", "bootstrap", "unencrypted_payload", bootstrapBody, request, response.StatusCode, response.Header.Get("Content-Type"), response.Header)
 		if bodyErr != nil {
 			session.state = kerberosSessionInvalid
 			return &KerberosError{Stage: "http", StatusCode: response.StatusCode, Err: bodyErr}
@@ -272,6 +289,7 @@ func (session *kerberosSession) establishLocked(ctx context.Context) error {
 }
 
 func (session *kerberosSession) postPlaintextLocked(ctx context.Context, message string, maxBodySize int) (string, error) {
+	exchangeID := nextWinRMCaptureExchangeID()
 	if maxBodySize <= 0 {
 		return "", &KerberosError{Stage: "config", Err: errors.New("positive envelope size is required")}
 	}
@@ -280,14 +298,21 @@ func (session *kerberosSession) postPlaintextLocked(ctx context.Context, message
 		return "", &KerberosError{Stage: "config", Err: err}
 	}
 	request.Header.Set("Content-Type", soapXML+";charset=UTF-8")
+	debugSOAPPayload("request", "plaintext", []byte(message))
+	emitWinRMCaptureRecord(exchangeID, "request", "plaintext", "unencrypted_payload", []byte(message), request, 0, request.Header.Get("Content-Type"), request.Header)
+	emitWinRMCaptureRecord(exchangeID, "request", "plaintext", "final_packet", []byte(message), request, 0, request.Header.Get("Content-Type"), request.Header)
 	tracker := &kerberosConnectionTracker{expected: session.connection}
 	request = request.WithContext(httptrace.WithClientTrace(request.Context(), tracker.trace()))
 	response, err := session.httpClient.Do(request)
+	debugHTTPRoundTrip(request, response, err)
 	if err != nil {
 		session.invalidateLocked()
 		return "", &KerberosError{Stage: "http", Err: err}
 	}
 	body, readErr := readBoundedBody(response.Body, maxBodySize)
+	debugSOAPPayload("response", "plaintext", body)
+	emitWinRMCaptureRecord(exchangeID, "response", "plaintext", "final_packet", body, request, response.StatusCode, response.Header.Get("Content-Type"), response.Header)
+	emitWinRMCaptureRecord(exchangeID, "response", "plaintext", "unencrypted_payload", body, request, response.StatusCode, response.Header.Get("Content-Type"), response.Header)
 	connection, changed := tracker.result()
 	if connection == nil || changed {
 		session.invalidateLocked()
