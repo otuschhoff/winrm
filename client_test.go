@@ -2,7 +2,9 @@ package winrm
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
+	"errors"
 	"net/http"
 	"strings"
 
@@ -18,6 +20,22 @@ type Requester struct {
 	http      func(*Client, *soap.SoapMessage) (string, error)
 	transport http.RoundTripper
 	dial      func(network, addr string) (net.Conn, error)
+}
+
+type contextRequester struct {
+	Requester
+	context context.Context
+	closed  int
+}
+
+func (requester *contextRequester) PostContext(ctx context.Context, client *Client, request *soap.SoapMessage) (string, error) {
+	requester.context = ctx
+	return "", ctx.Err()
+}
+
+func (requester *contextRequester) Close() error {
+	requester.closed++
+	return nil
 }
 
 func (r *Requester) Post(client *Client, request *soap.SoapMessage) (string, error) {
@@ -70,6 +88,24 @@ func (s *WinRMSuite) TestClientCreateShell(c *C) {
 
 	shell, _ := client.CreateShell()
 	c.Assert(shell.id, Equals, "67A74734-DD32-4F10-89DE-49A060483810")
+}
+
+func (s *WinRMSuite) TestClientCreateShellPropagatesContext(c *C) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	requester := &contextRequester{}
+	client := &Client{Parameters: *DefaultParameters, url: "http://host.example.test/wsman", http: requester}
+	_, err := client.CreateShellWithContext(ctx)
+	c.Assert(errors.Is(err, context.Canceled), Equals, true)
+	c.Assert(requester.context, Equals, ctx)
+}
+
+func (s *WinRMSuite) TestClientCloseDelegatesToTransport(c *C) {
+	requester := &contextRequester{}
+	client := &Client{http: requester}
+	c.Assert(client.Close(), IsNil)
+	c.Assert(requester.closed, Equals, 1)
+	c.Assert((&Client{http: &Requester{}}).Close(), IsNil)
 }
 
 func (s *WinRMSuite) TestRun(c *C) {

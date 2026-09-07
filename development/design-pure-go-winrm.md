@@ -1,10 +1,11 @@
 # Pure-Go WinRM: Design and Implementation Plan
 
-Status: Phase 1 complete; Kerberos GSS context export available in gokrb5 v8.5.1.
+Status: Phase 2 complete; encrypted SOAP remains Phase 3 work.
 Date: 2026-09-07.
 
 Phase 0 is complete; see the [Phase 0 implementation note](phase-0-implementation.md).
 Phase 1 is complete; see the [Phase 1 implementation note](phase-1-implementation.md).
+Phase 2 is complete; see the [Phase 2 implementation note](phase-2-implementation.md).
 
 ## 1. Goal and Release Contract
 
@@ -46,8 +47,9 @@ host is a blocked gate, not a pass.
 
 Repository anchors:
 
-- [kerberos.go](../kerberos.go): constructs a new Kerberos client per SOAP POST,
-  sends a preemptive SPNEGO header, and reads the response as plaintext.
+- [kerberos.go](../kerberos.go) and [kerberos_session.go](../kerberos_session.go):
+  retain credentials and an established connection-bound GSS context, bootstrap
+  with an empty POST, and reject protected SOAP until Phase 3.
 - [encryption.go](../encryption.go): NTLM-specific encryption implementation;
   Kerberos support is explicitly unimplemented. Do not copy its plaintext
   fallback behavior into the new Kerberos implementation.
@@ -68,8 +70,9 @@ Observed on 2026-09-07:
   do not claim an isolated experiment proved the effect of each individually.
 - The opsctl capture shows an empty HTTP bootstrap receiving 200, then
   `multipart/encrypted` SOAP exchanges receiving 200 on port 5985.
-- Native Go still returns HTTP 500; its current transport does not perform
-  WinRM Kerberos wrapping/unwrapping or verify server context establishment.
+- Native Go now verifies and retains server context establishment. The default
+  HTTP mode deliberately stops before SOAP because Phase 3 message protection
+  is not implemented yet.
 - The earlier machine-account keytab received 401 and has since been removed.
   Keytab authorization on this host is not a release gate.
 - Equal failures currently pass the comparison test. This is diagnostic behavior

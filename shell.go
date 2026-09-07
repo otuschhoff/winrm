@@ -20,7 +20,7 @@ func (s *Shell) ExecuteWithContext(ctx context.Context, command string, argument
 	request := NewExecuteCommandRequest(s.client.url, s.id, command, arguments, &s.client.Parameters)
 	defer request.Free()
 
-	response, err := s.client.sendRequest(request)
+	response, err := s.client.sendRequestContext(ctx, request)
 	if err != nil {
 		return nil, err
 	}
