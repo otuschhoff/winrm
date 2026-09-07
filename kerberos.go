@@ -9,10 +9,11 @@ import (
 
 	"github.com/masterzen/winrm/soap"
 
-	"github.com/jcmturner/gokrb5/v8/client"
-	"github.com/jcmturner/gokrb5/v8/config"
-	"github.com/jcmturner/gokrb5/v8/credentials"
-	"github.com/jcmturner/gokrb5/v8/spnego"
+	"github.com/otuschhoff/gokrb5/v8/client"
+	"github.com/otuschhoff/gokrb5/v8/config"
+	"github.com/otuschhoff/gokrb5/v8/credentials"
+	"github.com/otuschhoff/gokrb5/v8/keytab"
+	"github.com/otuschhoff/gokrb5/v8/spnego"
 )
 
 // Settings holds all the information necessary to configure the provider
@@ -27,6 +28,7 @@ type Settings struct {
 	KrbConfig            string
 	KrbSpn               string
 	KrbCCache            string
+	KrbKeytab            string
 	WinRMUseNTLM         bool
 	WinRMPassCredentials bool
 }
@@ -42,6 +44,7 @@ type ClientKerberos struct {
 	SPN       string
 	KrbConf   string
 	KrbCCache string
+	KrbKeytab string
 }
 
 func NewClientKerberos(settings *Settings) *ClientKerberos {
@@ -54,6 +57,7 @@ func NewClientKerberos(settings *Settings) *ClientKerberos {
 		Proto:     settings.WinRMProto,
 		KrbConf:   settings.KrbConfig,
 		KrbCCache: settings.KrbCCache,
+		KrbKeytab: settings.KrbKeytab,
 		SPN:       settings.KrbSpn,
 	}
 }
@@ -85,6 +89,13 @@ func (c *ClientKerberos) Post(clt *Client, request *soap.SoapMessage) (string, e
 		if err != nil {
 			return "", fmt.Errorf("unable to create kerberos client from ccache: %w", err)
 		}
+	} else if len(c.KrbKeytab) > 0 {
+		kt, err := keytab.Load(c.KrbKeytab)
+		if err != nil {
+			return "", fmt.Errorf("unable to read keytab file %s: %w", c.KrbKeytab, err)
+		}
+		kerberosClient = client.NewWithKeytab(c.Username, c.Realm, kt, cfg,
+			client.DisablePAFXFAST(true), client.AssumePreAuthentication(true))
 	} else {
 		kerberosClient = client.NewWithPassword(c.Username, c.Realm, c.Password, cfg,
 			client.DisablePAFXFAST(true), client.AssumePreAuthentication(true))
