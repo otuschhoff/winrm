@@ -26,3 +26,7 @@ _testmain.go
 
 *.coverprofile
 *.cov
+__pycache__/
+user
+krb5.keytab
+pw

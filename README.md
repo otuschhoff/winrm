@@ -5,7 +5,10 @@ _Note_: if you're looking for the `winrm` command-line tool, this has been split
 This is a Go library to execute remote commands on Windows machines through
 the use of WinRM/WinRS.
 
-_Note_: this library doesn't support domain users (it doesn't support GSSAPI nor Kerberos). It's primary target is to execute remote commands on EC2 windows machines.
+Kerberos authentication for domain users is available through the pluggable
+transport API. Kerberos message encryption over HTTP is not yet implemented, so
+servers that require encrypted WinRM messages are not supported by the native Go
+transport yet. See the integration gates below for current interoperability status.
 
 [![Build Status](https://travis-ci.org/masterzen/winrm.svg?branch=master)](https://travis-ci.org/masterzen/winrm)
 [![Coverage Status](https://coveralls.io/repos/masterzen/winrm/badge.png)](https://coveralls.io/r/masterzen/winrm)
@@ -21,7 +24,7 @@ WinRM is available on Windows Server 2008 and up. This project natively supports
 _Note_: This library only supports Golang 1.7+
 
 ### Preparing the remote Windows machine for Basic authentication
-This project supports only basic authentication for local accounts (domain users are not supported). The remote windows system must be prepared for winrm:
+This basic-authentication setup supports local accounts only. The remote windows system must be prepared for winrm:
 
 _For a PowerShell script to do what is described below in one go, check [Richard Downer's blog](http://www.frontiertown.co.uk/2011/12/overthere-control-windows-from-java/)_
 
@@ -189,6 +192,46 @@ if err != nil {
         panic(err)
 }
 
+```
+
+### Kerberos integration comparison
+
+The opt-in success-parity test runs `hostname` through both this Go client and
+`pywinrm`. It passes only when both clients return exit code 0, stdout
+`win-host`, and empty stderr. Matching failures do not pass.
+Install the Python dependency in a virtual environment first:
+
+```sh
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements-integration.txt
+```
+
+Run the success-parity gate with the principal in `user` and password in `pw`:
+
+```sh
+WINRM_KERBEROS_COMPARISON=1 WINRM_KRB_AUTH=password \
+  WINRM_KRB_CONFIG=/etc/krb5.conf \
+  WINRM_PYTHON=.venv/bin/python \
+  go test -count=1 -run '^TestKerberosComparisonWithPywinrm$' -v .
+```
+
+Run the independently passing pywinrm baseline with HTTP-SPNEGO message
+encryption enabled automatically:
+
+```sh
+WINRM_PYWINRM_INTEGRATION=1 WINRM_KRB_AUTH=password \
+  WINRM_KRB_CONFIG=/etc/krb5.conf \
+  WINRM_PYTHON=.venv/bin/python \
+  go test -count=1 -run '^TestPywinrmIntegration$' -v .
+```
+
+For failure comparison during development, use the separate diagnostic test:
+
+```sh
+WINRM_KERBEROS_DIAGNOSTIC=1 WINRM_KRB_AUTH=password \
+  WINRM_KRB_CONFIG=/etc/krb5.conf \
+  WINRM_PYTHON=.venv/bin/python \
+  go test -count=1 -run '^TestKerberosComparisonDiagnostic$' -v .
 ```
 
 
