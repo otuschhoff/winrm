@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/masterzen/winrm/soap"
+	"github.com/otuschhoff/winrm/soap"
 
 	"net"
 	"time"

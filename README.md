@@ -15,7 +15,7 @@ See the integration gates below for interoperability checks.
 
 ## Contact
 
-- Bugs: https://github.com/masterzen/winrm/issues
+- Bugs: https://github.com/otuschhoff/winrm/issues
 
 
 ## Getting Started
@@ -61,7 +61,7 @@ All __N.B__ points of "Preparing the remote Windows machine for Basic authentica
 You can build winrm from source:
 
 ```sh
-git clone https://github.com/masterzen/winrm
+git clone https://github.com/otuschhoff/winrm
 cd winrm
 make
 ```
@@ -88,7 +88,7 @@ For the fast version (this doesn't allow to send input to the command) and it's 
 package main
 
 import (
-	"github.com/masterzen/winrm"
+  "github.com/otuschhoff/winrm"
 	"os"
 )
 
@@ -106,7 +106,7 @@ or
 ```go
 package main
 import (
-  "github.com/masterzen/winrm"
+  "github.com/otuschhoff/winrm"
   "fmt"
   "os"
 )
@@ -131,7 +131,7 @@ By passing a TransportDecorator in the Parameters struct it is possible to use d
 ```go
 package main
 import (
-  "github.com/masterzen/winrm"
+  "github.com/otuschhoff/winrm"
   "fmt"
   "os"
 )
@@ -160,7 +160,7 @@ package main
 import (
   "os"
   "fmt"
-  "github.com/masterzen/winrm"
+  "github.com/otuschhoff/winrm"
 )
 
 endpoint := winrm.NewEndpoint("srv-win", 5985, false, false, nil, nil, nil, 0)
@@ -296,7 +296,7 @@ By passing a Dial in the Parameters struct it is possible to use different diale
 package main
      
  import (
-    "github.com/masterzen/winrm"
+    "github.com/otuschhoff/winrm"
     "golang.org/x/crypto/ssh"
     "os"
  )
@@ -336,7 +336,7 @@ For a more complex example, it is possible to call the various functions directl
 package main
 
 import (
-  "github.com/masterzen/winrm"
+  "github.com/otuschhoff/winrm"
   "fmt"
   "bytes"
   "os"
@@ -373,7 +373,7 @@ For using HTTPS authentication with x 509 cert without checking the CA
 package main
 
 import (
-    "github.com/masterzen/winrm"
+    "github.com/otuschhoff/winrm"
     "log"
     "os"
 )
@@ -432,7 +432,7 @@ For some additional dependencies, Go needs [Mercurial](http://mercurial.selenic.
 and [Bazaar](http://bazaar.canonical.com/en/) to be installed.
 Winrm itself doesn't require these, but a dependency of a dependency does.
 
-Next, clone this repository into `$GOPATH/src/github.com/masterzen/winrm` and
+Next, clone this repository into `$GOPATH/src/github.com/otuschhoff/winrm` and
 then just type `make`.
 
 You can run tests by typing `make test`.

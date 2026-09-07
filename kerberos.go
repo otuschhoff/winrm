@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"net/url"
 
-	"github.com/masterzen/winrm/soap"
+	"github.com/otuschhoff/winrm/soap"
 )
 
 const (

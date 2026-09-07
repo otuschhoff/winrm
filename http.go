@@ -11,7 +11,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/masterzen/winrm/soap"
+	"github.com/otuschhoff/winrm/soap"
 )
 
 var soapXML = "application/soap+xml"
@@ -100,6 +100,7 @@ func (c clientRequest) PostContext(ctx context.Context, client *Client, request 
 	req.Header.Set("Content-Type", soapXML+";charset=UTF-8")
 	req.SetBasicAuth(client.username, client.password)
 	resp, err := httpClient.Do(req)
+	debugHTTPRoundTrip(req, resp, err)
 	if err != nil {
 		return "", fmt.Errorf("unknown error %w", err)
 	}
