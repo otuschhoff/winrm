@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/otuschhoff/gokrb5/v8/gssapi"
+	"github.com/otuschhoff/gokrb5/v8/spnego"
 	"github.com/otuschhoff/gokrb5/v8/types"
 )
 
@@ -230,12 +231,12 @@ func TestKerberosSessionRetriesBootstrapOnConnectionReplacement(t *testing.T) {
 	factoryCalls := 0
 	session := newFixtureKerberosSession(transport, func(client *http.Client) kerberosNegotiator {
 		factoryCalls++
-		return &fixtureKerberosNegotiator{client: client, rounds: 2, context: fixtureSecurityContext(t)}
+		return &fixtureKerberosNegotiator{client: client, rounds: 2, unauthenticatedFirst: true, context: fixtureSecurityContext(t)}
 	})
 	if err := session.establishForTest(); err != nil {
 		t.Fatal(err)
 	}
-	if factoryCalls != 2 || session.connection != second {
+	if factoryCalls != 1 || session.connection != second {
 		t.Fatalf("reconnect result = factories %d, connection %v", factoryCalls, session.connection)
 	}
 }
@@ -254,26 +255,34 @@ func TestKerberosSessionRejectsRedirects(t *testing.T) {
 
 func TestKerberosSessionPostModesAndConnectionLoss(t *testing.T) {
 	connection := &fixtureConnection{id: "bound"}
-	transport := &scriptedKerberosTransport{steps: []kerberosHTTPFixture{{status: http.StatusOK, connection: connection}}}
-	session := newFixtureKerberosSession(transport, func(client *http.Client) kerberosNegotiator {
-		return &fixtureKerberosNegotiator{client: client, rounds: 1, context: fixtureSecurityContext(t)}
+	initiator, acceptor := newTestKerberosGSSPair(t, 18, []byte("0123456789abcdef0123456789abcdef"), true)
+	encryptedTransport := &encryptedKerberosTransport{
+		connection: connection, serverAdapter: acceptor, response: "<encrypted-response/>",
+	}
+	session := newFixtureKerberosSession(encryptedTransport, func(client *http.Client) kerberosNegotiator {
+		return &fixtureKerberosNegotiator{client: client, rounds: 1, context: initiator.context.(gssapi.Context)}
 	})
 	session.requireEncryption = true
-	if _, err := session.post(context.Background(), "<soap/>", 1024); err == nil || !strings.Contains(err.Error(), "Phase 3") {
-		t.Fatalf("protected post error = %v", err)
+	result, err := session.post(context.Background(), "<encrypted-soap/>", 1024)
+	if err != nil || result != "<encrypted-response/>" {
+		t.Fatalf("protected post = %q, %v", result, err)
 	}
-	if transport.calls() != 1 || transport.bodies()[0] != "" {
-		t.Fatalf("protected mode sent SOAP during bootstrap: calls %d, bodies %q", transport.calls(), transport.bodies())
+	if encryptedTransport.request != "<encrypted-soap/>" || encryptedTransport.calls != 2 {
+		t.Fatalf("protected request/calls = %q/%d", encryptedTransport.request, encryptedTransport.calls)
 	}
 
-	transport = &scriptedKerberosTransport{steps: []kerberosHTTPFixture{
-		{status: http.StatusOK, connection: connection},
-		{status: http.StatusOK, connection: connection, contentType: soapXML, body: "<response/>"},
-	}}
+	transport := &scriptedKerberosTransport{steps: []kerberosHTTPFixture{{status: http.StatusOK, connection: connection}}}
 	session = newFixtureKerberosSession(transport, func(client *http.Client) kerberosNegotiator {
 		return &fixtureKerberosNegotiator{client: client, rounds: 1, context: fixtureSecurityContext(t)}
 	})
-	result, err := session.post(context.Background(), "<soap/>", 1024)
+	transport.steps = []kerberosHTTPFixture{
+		{status: http.StatusOK, connection: connection},
+		{status: http.StatusOK, connection: connection, contentType: soapXML, body: "<response/>"},
+	}
+	session = newFixtureKerberosSession(transport, func(client *http.Client) kerberosNegotiator {
+		return &fixtureKerberosNegotiator{client: client, rounds: 1, context: fixtureSecurityContext(t)}
+	})
+	result, err = session.post(context.Background(), "<soap/>", 1024)
 	if err != nil || result != "<response/>" {
 		t.Fatalf("plaintext post = %q, %v", result, err)
 	}
@@ -312,6 +321,78 @@ func TestKerberosSessionPostModesAndConnectionLoss(t *testing.T) {
 	if bodies := transport.bodies(); bodies[2] != "" || bodies[3] != "<fresh-soap/>" {
 		t.Fatalf("post-replacement request bodies = %q", bodies)
 	}
+}
+
+func TestKerberosSessionEncryptedResponseHandling(t *testing.T) {
+	t.Run("authenticated SOAP fault", func(t *testing.T) {
+		session, transport := newEncryptedFixtureSession(t, executeCommandResponseWithError)
+		transport.responseStatus = http.StatusInternalServerError
+		response, err := session.post(context.Background(), "<soap/>", 4096)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, parseErr := ParseExecuteCommandResponse(response)
+		var commandError *ExecuteCommandError
+		if !errors.As(parseErr, &commandError) || commandError.Body != executeCommandResponseWithError {
+			t.Fatalf("SOAP fault = %#v", parseErr)
+		}
+		if session.state != kerberosSessionEstablished || transport.calls != 2 {
+			t.Fatalf("fault state/calls = %d/%d", session.state, transport.calls)
+		}
+	})
+
+	tests := []struct {
+		name      string
+		configure func(*encryptedKerberosTransport)
+		wantStage string
+	}{
+		{name: "plaintext fallback", configure: func(transport *encryptedKerberosTransport) { transport.plaintext = true }, wantStage: "unwrap"},
+		{name: "tampered ciphertext", configure: func(transport *encryptedKerberosTransport) { transport.tamper = true }, wantStage: "unwrap"},
+		{name: "oversized response", configure: func(transport *encryptedKerberosTransport) { transport.oversized = true }, wantStage: "http"},
+		{name: "replacement connection", configure: func(transport *encryptedKerberosTransport) {
+			transport.responseConnection = &fixtureConnection{id: "replacement"}
+		}, wantStage: "http"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			session, transport := newEncryptedFixtureSession(t, "<response/>")
+			test.configure(transport)
+			_, err := session.post(context.Background(), "<soap/>", 1024)
+			var kerberosError *KerberosError
+			if !errors.As(err, &kerberosError) || kerberosError.Stage != test.wantStage {
+				t.Fatalf("error = %#v, want stage %q", err, test.wantStage)
+			}
+			if session.state != kerberosSessionInvalid || transport.calls != 2 {
+				t.Fatalf("failure state/calls = %d/%d", session.state, transport.calls)
+			}
+		})
+	}
+}
+
+func TestKerberosBoundedReadCloserReportsBytesWrittenOnOverflow(t *testing.T) {
+	body := io.NopCloser(strings.NewReader("12345"))
+	reader := &kerberosBoundedReadCloser{reader: body, closer: body, remaining: 4}
+	buffer := make([]byte, 8)
+
+	count, err := reader.Read(buffer)
+	if count != 5 || err == nil || !strings.Contains(err.Error(), "exceeds configured limit") {
+		t.Fatalf("overflow read = (%d, %v), want (5, limit error)", count, err)
+	}
+	if string(buffer[:count]) != "12345" {
+		t.Fatalf("overflow bytes = %q", buffer[:count])
+	}
+}
+
+func newEncryptedFixtureSession(t *testing.T, response string) (*kerberosSession, *encryptedKerberosTransport) {
+	t.Helper()
+	connection := &fixtureConnection{id: "encrypted"}
+	initiator, acceptor := newTestKerberosGSSPair(t, 18, []byte("0123456789abcdef0123456789abcdef"), true)
+	transport := &encryptedKerberosTransport{connection: connection, serverAdapter: acceptor, response: response}
+	session := newFixtureKerberosSession(transport, func(client *http.Client) kerberosNegotiator {
+		return &fixtureKerberosNegotiator{client: client, rounds: 1, context: initiator.context.(gssapi.Context)}
+	})
+	session.requireEncryption = true
+	return session, transport
 }
 
 func TestKerberosSessionCloseIsIdempotent(t *testing.T) {
@@ -359,10 +440,11 @@ func fixtureSecurityContext(t *testing.T) gssapi.Context {
 }
 
 type fixtureKerberosNegotiator struct {
-	client  *http.Client
-	rounds  int
-	context gssapi.Context
-	err     error
+	client               *http.Client
+	rounds               int
+	unauthenticatedFirst bool
+	context              gssapi.Context
+	err                  error
 }
 
 func (negotiator *fixtureKerberosNegotiator) Do(request *http.Request) (*http.Response, error) {
@@ -372,7 +454,11 @@ func (negotiator *fixtureKerberosNegotiator) Do(request *http.Request) (*http.Re
 			response.Body.Close()
 		}
 		var err error
-		response, err = negotiator.client.Do(request.Clone(request.Context()))
+		current := request.Clone(request.Context())
+		if round > 0 || !negotiator.unauthenticatedFirst {
+			current.Header.Set(spnego.HTTPHeaderAuthRequest, "Negotiate fixture")
+		}
+		response, err = negotiator.client.Do(current)
 		if err != nil {
 			return response, err
 		}
@@ -400,6 +486,78 @@ type scriptedKerberosTransport struct {
 type cancelableKerberosTransport struct {
 	started chan struct{}
 	once    sync.Once
+}
+
+type encryptedKerberosTransport struct {
+	connection         net.Conn
+	responseConnection net.Conn
+	serverAdapter      *kerberosGSSAdapter
+	response           string
+	responseStatus     int
+	request            string
+	calls              int
+	plaintext          bool
+	tamper             bool
+	oversized          bool
+}
+
+func (transport *encryptedKerberosTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	transport.calls++
+	connection := transport.connection
+	if transport.calls > 1 && transport.responseConnection != nil {
+		connection = transport.responseConnection
+	}
+	if trace := httptrace.ContextClientTrace(request.Context()); trace != nil && trace.GotConn != nil {
+		trace.GotConn(httptrace.GotConnInfo{Conn: connection, Reused: transport.calls > 1})
+	}
+	if transport.calls == 1 {
+		return &http.Response{
+			StatusCode: http.StatusOK, Header: make(http.Header), Body: http.NoBody, Request: request,
+		}, nil
+	}
+	requestBody, err := io.ReadAll(request.Body)
+	if err != nil {
+		return nil, err
+	}
+	framer, err := newKerberosMessageFramer(4096)
+	if err != nil {
+		return nil, err
+	}
+	plaintext, err := framer.open(request.Header.Get("Content-Type"), requestBody, transport.serverAdapter)
+	if err != nil {
+		return nil, err
+	}
+	transport.request = string(plaintext)
+	status := transport.responseStatus
+	if status == 0 {
+		status = http.StatusOK
+	}
+	if transport.plaintext {
+		header := make(http.Header)
+		header.Set("Content-Type", soapXML)
+		return &http.Response{
+			StatusCode: status, Header: header, Body: io.NopCloser(strings.NewReader(transport.response)), Request: request,
+		}, nil
+	}
+	if transport.oversized {
+		return &http.Response{
+			StatusCode: status, Header: make(http.Header),
+			Body: io.NopCloser(strings.NewReader(strings.Repeat("x", 1024+kerberosMaxWrapOverhead+kerberosMaxMetadataSize+1))), Request: request,
+		}, nil
+	}
+	contentType, responseBody, err := framer.seal([]byte(transport.response), transport.serverAdapter)
+	if err != nil {
+		return nil, err
+	}
+	header := make(http.Header)
+	header.Set("Content-Type", contentType)
+	if transport.tamper {
+		terminalLength := len("--" + kerberosMultipartBoundary + "--\r\n")
+		responseBody[len(responseBody)-terminalLength-1] ^= 0xff
+	}
+	return &http.Response{
+		StatusCode: status, Header: header, Body: io.NopCloser(strings.NewReader(string(responseBody))), Request: request,
+	}, nil
 }
 
 func (transport *cancelableKerberosTransport) RoundTrip(request *http.Request) (*http.Response, error) {

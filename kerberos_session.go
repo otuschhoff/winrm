@@ -1,6 +1,7 @@
 package winrm
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -79,7 +80,7 @@ func newKerberosSession(owner *ClientKerberos, endpoint *Endpoint) (*kerberosSes
 	}
 	session.newNegotiator = func(httpClient *http.Client) kerberosNegotiator {
 		return spnego.NewClientWithOptions(kerberosClient, httpClient, spn, spnego.KRB5TokenAPREQOptions{
-			GSSAPIFlags: []int{gssapi.ContextFlagMutual, gssapi.ContextFlagInteg, gssapi.ContextFlagConf},
+			GSSAPIFlags: []int{gssapi.ContextFlagMutual, gssapi.ContextFlagSequence, gssapi.ContextFlagInteg, gssapi.ContextFlagConf},
 		})
 	}
 	return session, nil
@@ -159,9 +160,50 @@ func (session *kerberosSession) post(ctx context.Context, message string, maxPla
 		return "", err
 	}
 	if session.requireEncryption {
-		return "", &KerberosError{Stage: "wrap", Err: errors.New("Kerberos protected SOAP transport is not implemented until Phase 3")}
+		return session.postEncryptedLocked(ctx, message, maxPlaintextSize)
 	}
 	return session.postPlaintextLocked(ctx, message, maxPlaintextSize)
+}
+
+func (session *kerberosSession) postEncryptedLocked(ctx context.Context, message string, maxPlaintextSize int) (string, error) {
+	framer, err := newKerberosMessageFramer(maxPlaintextSize)
+	if err != nil {
+		return "", &KerberosError{Stage: "config", Err: err}
+	}
+	contentType, body, err := framer.seal([]byte(message), session.adapter)
+	if err != nil {
+		session.invalidateLocked()
+		return "", &KerberosError{Stage: "wrap", Err: err}
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, session.endpoint, bytes.NewReader(body))
+	if err != nil {
+		return "", &KerberosError{Stage: "config", Err: err}
+	}
+	request.Header.Set("Content-Type", contentType)
+	tracker := &kerberosConnectionTracker{expected: session.connection}
+	request = request.WithContext(httptrace.WithClientTrace(request.Context(), tracker.trace()))
+	response, err := session.httpClient.Do(request)
+	if err != nil {
+		session.invalidateLocked()
+		return "", &KerberosError{Stage: "http", Err: err}
+	}
+	responseLimit := maxPlaintextSize + kerberosMaxWrapOverhead + kerberosMaxMetadataSize
+	encryptedBody, readErr := readBoundedBody(response.Body, responseLimit)
+	connection, changed := tracker.result()
+	if connection == nil || changed {
+		session.invalidateLocked()
+		return "", &KerberosError{Stage: "http", Err: errors.New("Kerberos HTTP connection changed; SOAP was not replayed")}
+	}
+	if readErr != nil {
+		session.invalidateLocked()
+		return "", &KerberosError{Stage: "http", StatusCode: response.StatusCode, Err: readErr}
+	}
+	plaintext, err := framer.open(response.Header.Get("Content-Type"), encryptedBody, session.adapter)
+	if err != nil {
+		session.invalidateLocked()
+		return "", &KerberosError{Stage: "unwrap", StatusCode: response.StatusCode, Err: err}
+	}
+	return string(plaintext), nil
 }
 
 func (session *kerberosSession) establishLocked(ctx context.Context) error {
@@ -176,8 +218,8 @@ func (session *kerberosSession) establishLocked(ctx context.Context) error {
 	clientCopy := *session.httpClient
 	clientCopy.Transport = counting
 	for counting.remaining > 0 {
-		tracker := &kerberosConnectionTracker{}
-		request, err := http.NewRequestWithContext(httptrace.WithClientTrace(ctx, tracker.trace()), http.MethodPost, session.endpoint, nil)
+		counting.resetAuthenticatedConnection()
+		request, err := http.NewRequestWithContext(ctx, http.MethodPost, session.endpoint, nil)
 		if err != nil {
 			session.state = kerberosSessionInvalid
 			return &KerberosError{Stage: "config", Err: err}
@@ -197,7 +239,7 @@ func (session *kerberosSession) establishLocked(ctx context.Context) error {
 			session.state = kerberosSessionInvalid
 			return &KerberosError{Stage: "http", StatusCode: response.StatusCode, Err: bodyErr}
 		}
-		connection, changed := tracker.result()
+		connection, changed := counting.authenticatedConnection()
 		if changed {
 			continue
 		}
@@ -287,20 +329,51 @@ func (session *kerberosSession) close() error {
 }
 
 type kerberosCountingRoundTripper struct {
-	base      http.RoundTripper
-	remaining int
+	mu             sync.Mutex
+	base           http.RoundTripper
+	remaining      int
+	connection     net.Conn
+	connectionLost bool
 }
 
 func (transport *kerberosCountingRoundTripper) RoundTrip(request *http.Request) (*http.Response, error) {
+	transport.mu.Lock()
 	if transport.remaining == 0 {
+		transport.mu.Unlock()
 		return nil, errors.New("Kerberos bootstrap exceeded five HTTP exchanges")
 	}
 	transport.remaining--
+	transport.mu.Unlock()
+	if request.Header.Get(spnego.HTTPHeaderAuthRequest) != "" {
+		request = request.Clone(httptrace.WithClientTrace(request.Context(), &httptrace.ClientTrace{
+			GotConn: func(info httptrace.GotConnInfo) {
+				transport.mu.Lock()
+				defer transport.mu.Unlock()
+				if transport.connection != nil && transport.connection != info.Conn {
+					transport.connectionLost = true
+				}
+				transport.connection = info.Conn
+			},
+		}))
+	}
 	response, err := transport.base.RoundTrip(request)
 	if response != nil && response.Body != nil {
 		response.Body = &kerberosBoundedReadCloser{reader: response.Body, closer: response.Body, remaining: kerberosMaxBootstrapBody}
 	}
 	return response, err
+}
+
+func (transport *kerberosCountingRoundTripper) resetAuthenticatedConnection() {
+	transport.mu.Lock()
+	transport.connection = nil
+	transport.connectionLost = false
+	transport.mu.Unlock()
+}
+
+func (transport *kerberosCountingRoundTripper) authenticatedConnection() (net.Conn, bool) {
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	return transport.connection, transport.connectionLost
 }
 
 type kerberosConnectionTracker struct {
@@ -344,7 +417,7 @@ func (reader *kerberosBoundedReadCloser) Read(buffer []byte) (int, error) {
 	count, err := reader.reader.Read(buffer)
 	if count > reader.remaining {
 		reader.overflow = true
-		return reader.remaining, errors.New("Kerberos HTTP response exceeds configured limit")
+		return count, errors.New("Kerberos HTTP response exceeds configured limit")
 	}
 	reader.remaining -= count
 	return count, err

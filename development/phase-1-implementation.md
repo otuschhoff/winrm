@@ -13,8 +13,8 @@ belong to Phase 2.
 Production prototypes:
 
 - `kerberos_gss.go` adapts an established `gssapi.Context`, requires
-  confidentiality, validates the RFC 4121 Wrap token header, and separates its
-  fixed 16-byte security header from the encrypted payload.
+  confidentiality and validates the RFC 4121 Wrap token header. Phase 3 refined
+  its initial contiguous-token split to the GSS IOV layout required by WinRM.
 - `kerberos_message.go` writes and parses the WinRM
   `multipart/encrypted` representation without searching opaque ciphertext for
   delimiters. It validates media parameters, metadata, boundaries, token and
@@ -69,16 +69,18 @@ resulting acceptor-subkey flags and asymmetric send/receive sequence behavior.
 
 ## Wire Contract and Bounds
 
-The Kerberos encrypted stream is:
+Phase 3 established that the Kerberos encrypted stream is:
 
 ```text
-uint32 little-endian security-header length (16)
-16-byte RFC 4121 Wrap token header
-encrypted Wrap token body
+uint32 little-endian security-header length
+RFC 4121 header plus rotated cryptographic overhead
+encrypted application data
 ```
 
-This matches pywinrm 0.5.0's `wrap_winrm` contract. The surrounding content type
-is `multipart/encrypted` with protocol
+The fixed RFC 4121 token header is 16 bytes, but the WinRM GSS IOV security
+header is 60, 64, or 72 bytes for the supported AES profiles. This matches
+pywinrm 0.5.0's `wrap_winrm` contract. The surrounding content type is
+`multipart/encrypted` with protocol
 `application/HTTP-SPNEGO-session-encrypted`. `OriginalContent.Length` is the
 UTF-8 plaintext byte count, not a character count.
 
@@ -148,5 +150,6 @@ and stale-context clearing. The complete fork suite and vet pass with CGO
 disabled; focused race tests pass with CGO enabled. The complete WinRM suite
 also passes against the local fork.
 
-The API blocker is resolved by the pinned `v8.5.1` release. No local
-absolute-path replacement is present in `go.mod`.
+The original API blocker was resolved by `v8.5.1`. Phase 3 now pins `v8.5.2`
+for Windows AP-REP ticket-key interoperability. No local absolute-path
+replacement is present in `go.mod`.

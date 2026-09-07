@@ -45,13 +45,14 @@ func TestKerberosMessageFramerRoundTrip(t *testing.T) {
 
 func TestKerberosMessageFramerGoldenFixture(t *testing.T) {
 	header := []byte{5, 4, 6, 255, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7}
-	payload := []byte("cipher--Encrypted Boundary\r\ntext")
-	context := &fixtureKerberosGSSContext{header: header, payload: payload, message: []byte("hello")}
+	ciphertext := []byte("cipher--Encrypted Boundary\r\ntext")
+	message := bytes.Repeat([]byte("m"), len(ciphertext))
+	context := &fixtureKerberosGSSContext{header: header, payload: fixtureKerberosGSSBody(ciphertext), message: message}
 	adapter, err := newKerberosGSSAdapter(context)
 	if err != nil {
 		t.Fatal(err)
 	}
-	framer, err := newKerberosMessageFramer(5)
+	framer, err := newKerberosMessageFramer(len(message))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -60,11 +61,16 @@ func TestKerberosMessageFramerGoldenFixture(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	iovHeader := append([]byte(nil), header...)
+	binary.BigEndian.PutUint16(iovHeader[6:8], 28)
+	iovHeader = append(iovHeader, bytes.Repeat([]byte{0x22}, 16)...)
+	iovHeader = append(iovHeader, bytes.Repeat([]byte{0x33}, 12)...)
+	iovHeader = append(iovHeader, bytes.Repeat([]byte{0x11}, 16)...)
 	var stream bytes.Buffer
-	binary.Write(&stream, binary.LittleEndian, uint32(kerberosGSSHeaderLength))
-	stream.Write(header)
-	stream.Write(payload)
-	want := fmt.Sprintf("--Encrypted Boundary\r\n\tContent-Type: %s\r\n\tOriginalContent: type=%s;Length=5\r\n--Encrypted Boundary\r\n\tContent-Type: application/octet-stream\r\n", kerberosEncryptedProtocol, kerberosSOAPContentType)
+	binary.Write(&stream, binary.LittleEndian, uint32(len(iovHeader)))
+	stream.Write(iovHeader)
+	stream.Write(ciphertext)
+	want := fmt.Sprintf("--Encrypted Boundary\r\n\tContent-Type: %s\r\n\tOriginalContent: type=%s;Length=%d\r\n--Encrypted Boundary\r\n\tContent-Type: application/octet-stream\r\n", kerberosEncryptedProtocol, kerberosSOAPContentType, len(message))
 	wantBody := append([]byte(want), stream.Bytes()...)
 	wantBody = append(wantBody, []byte("--Encrypted Boundary--\r\n")...)
 	if contentType != `multipart/encrypted;protocol="application/HTTP-SPNEGO-session-encrypted";boundary="Encrypted Boundary"` {
@@ -73,12 +79,12 @@ func TestKerberosMessageFramerGoldenFixture(t *testing.T) {
 	if !bytes.Equal(body, wantBody) {
 		t.Fatalf("body differs from golden fixture")
 	}
-	message, err := framer.open(contentType, body, adapter)
+	opened, err := framer.open(contentType, body, adapter)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !bytes.Equal(message, context.message) {
-		t.Fatalf("message = %q", message)
+	if !bytes.Equal(opened, context.message) {
+		t.Fatalf("message = %q", opened)
 	}
 }
 
@@ -88,7 +94,7 @@ func TestKerberosMessageFramerRejectsMalformedInput(t *testing.T) {
 		t.Fatal(err)
 	}
 	context := &fixtureKerberosGSSContext{
-		header: fixtureKerberosGSSHeader(), payload: []byte("ciphertext"), message: []byte("hello"),
+		header: fixtureKerberosGSSHeader(), payload: fixtureKerberosGSSBody([]byte("12345")), message: []byte("hello"),
 	}
 	adapter, _ := newKerberosGSSAdapter(context)
 	contentType, validBody, err := framer.seal(context.message, adapter)
@@ -120,7 +126,8 @@ func TestKerberosMessageFramerRejectsMalformedInput(t *testing.T) {
 		{name: "empty declared length", contentType: contentType, mutate: replaceBytes([]byte("Length=5"), []byte("Length="), 1)},
 		{name: "duplicate declared length", contentType: contentType, mutate: replaceBytes([]byte("Length=5"), []byte("Length=5;Length=5"), 1)},
 		{name: "truncated stream", contentType: contentType, mutate: truncateEncryptedStream},
-		{name: "oversized security header", contentType: contentType, mutate: setSecurityHeaderLength(17)},
+		{name: "undersized security header", contentType: contentType, mutate: setSecurityHeaderLength(15)},
+		{name: "oversized security header", contentType: contentType, mutate: setSecurityHeaderLength(kerberosMaxWrapOverhead + 1)},
 		{name: "zero security header", contentType: contentType, mutate: setSecurityHeaderLength(0)},
 	}
 	for _, test := range tests {
@@ -141,7 +148,7 @@ func TestKerberosMessageFramerEnforcesSizeLimits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	context := &fixtureKerberosGSSContext{header: fixtureKerberosGSSHeader(), payload: []byte("ciphertext")}
+	context := &fixtureKerberosGSSContext{header: fixtureKerberosGSSHeader(), payload: fixtureKerberosGSSBody([]byte("1234"))}
 	adapter, _ := newKerberosGSSAdapter(context)
 	if _, _, err := framer.seal([]byte("12345"), adapter); err == nil {
 		t.Fatal("oversized plaintext was accepted")
@@ -167,6 +174,13 @@ func fixtureKerberosGSSHeader() []byte {
 	return []byte{0x05, 0x04, 0x02, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
 }
 
+func fixtureKerberosGSSBody(ciphertext []byte) []byte {
+	body := bytes.Repeat([]byte{0x11}, kerberosGSSConfounderLength)
+	body = append(body, ciphertext...)
+	body = append(body, bytes.Repeat([]byte{0x22}, kerberosGSSHeaderLength)...)
+	return append(body, bytes.Repeat([]byte{0x33}, 12)...)
+}
+
 func (context *fixtureKerberosGSSContext) Wrap(message []byte, confidential bool) ([]byte, error) {
 	if !confidential {
 		return nil, fmt.Errorf("confidentiality was not requested")
@@ -176,11 +190,24 @@ func (context *fixtureKerberosGSSContext) Wrap(message []byte, confidential bool
 }
 
 func (context *fixtureKerberosGSSContext) Unwrap(token []byte) ([]byte, bool, error) {
+	token = append([]byte(nil), token...)
+	rrc := int(binary.BigEndian.Uint16(token[6:8]))
+	rotateKerberosLeft(token[kerberosGSSHeaderLength:], rrc)
+	binary.BigEndian.PutUint16(token[6:8], 0)
 	want := append(append([]byte(nil), context.header...), context.payload...)
 	if !bytes.Equal(token, want) {
 		return nil, false, fmt.Errorf("wrapped token mismatch")
 	}
 	return append([]byte(nil), context.message...), true, nil
+}
+
+func rotateKerberosLeft(value []byte, count int) {
+	if len(value) == 0 {
+		return
+	}
+	count %= len(value)
+	rotated := append(append([]byte(nil), value[count:]...), value[:count]...)
+	copy(value, rotated)
 }
 
 func replaceBytes(old, replacement []byte, count int) func([]byte) []byte {
@@ -204,7 +231,7 @@ func setSecurityHeaderLength(length uint32) func([]byte) []byte {
 }
 
 func FuzzKerberosMessageFramerOpen(f *testing.F) {
-	context := &fixtureKerberosGSSContext{header: fixtureKerberosGSSHeader(), payload: []byte("ciphertext"), message: []byte("hello")}
+	context := &fixtureKerberosGSSContext{header: fixtureKerberosGSSHeader(), payload: fixtureKerberosGSSBody([]byte("12345")), message: []byte("hello")}
 	adapter, _ := newKerberosGSSAdapter(context)
 	framer, _ := newKerberosMessageFramer(64)
 	contentType, body, err := framer.seal(context.message, adapter)
@@ -214,7 +241,7 @@ func FuzzKerberosMessageFramerOpen(f *testing.F) {
 	f.Add(contentType, body)
 	f.Add("not a media type", []byte("invalid"))
 	f.Fuzz(func(t *testing.T, fuzzContentType string, fuzzBody []byte) {
-		fuzzContext := &fixtureKerberosGSSContext{header: fixtureKerberosGSSHeader(), payload: []byte("ciphertext"), message: []byte("hello")}
+		fuzzContext := &fixtureKerberosGSSContext{header: fixtureKerberosGSSHeader(), payload: fixtureKerberosGSSBody([]byte("12345")), message: []byte("hello")}
 		fuzzAdapter, _ := newKerberosGSSAdapter(fuzzContext)
 		_, _ = framer.open(fuzzContentType, fuzzBody, fuzzAdapter)
 	})

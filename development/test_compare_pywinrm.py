@@ -25,16 +25,16 @@ class TrimTerminalLineEndingTests(unittest.TestCase):
 
 class ValidateHostnameResultTests(unittest.TestCase):
     def test_accepts_expected_result(self):
-        self.assertEqual(validate_hostname_result("WIN-HOST", "", 0, "win-host"), "")
+        self.assertEqual(validate_hostname_result("SERVER", "", 0, "server"), "")
 
     def test_rejects_wrong_hostname(self):
-        self.assertIn("stdout", validate_hostname_result("other", "", 0, "win-host"))
+        self.assertIn("stdout", validate_hostname_result("other", "", 0, "server"))
 
     def test_rejects_stderr(self):
-        self.assertIn("stderr", validate_hostname_result("win-host", "warning", 0, "win-host"))
+        self.assertIn("stderr", validate_hostname_result("server", "warning", 0, "server"))
 
     def test_rejects_nonzero_exit(self):
-        self.assertIn("code 1", validate_hostname_result("win-host", "", 1, "win-host"))
+        self.assertIn("code 1", validate_hostname_result("server", "", 1, "server"))
 
 
 if __name__ == "__main__":

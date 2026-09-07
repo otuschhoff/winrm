@@ -103,7 +103,7 @@ func (framer *kerberosMessageFramer) open(contentType string, body []byte, adapt
 		return nil, errors.New("Kerberos multipart terminal boundary is missing")
 	}
 	encryptedStream := body[payloadStart : len(body)-len(terminalBoundary)]
-	if len(encryptedStream) < 4+kerberosGSSHeaderLength+1 {
+	if len(encryptedStream) < 4+kerberosGSSHeaderLength {
 		return nil, errors.New("Kerberos encrypted stream is truncated")
 	}
 
@@ -112,11 +112,11 @@ func (framer *kerberosMessageFramer) open(contentType string, body []byte, adapt
 		return nil, err
 	}
 	headerLength := uint64(binary.LittleEndian.Uint32(encryptedStream[:4]))
-	if headerLength != kerberosGSSHeaderLength {
-		return nil, fmt.Errorf("Kerberos security header length %d, want %d", headerLength, kerberosGSSHeaderLength)
+	if headerLength < kerberosGSSHeaderLength || headerLength > kerberosMaxWrapOverhead {
+		return nil, fmt.Errorf("Kerberos security header length %d is invalid", headerLength)
 	}
 	headerEnd := uint64(4) + headerLength
-	if headerEnd >= uint64(len(encryptedStream)) {
+	if headerEnd > uint64(len(encryptedStream)) {
 		return nil, errors.New("Kerberos encrypted stream is truncated")
 	}
 	message, err := adapter.unwrap(encryptedStream[4:headerEnd], encryptedStream[headerEnd:])
