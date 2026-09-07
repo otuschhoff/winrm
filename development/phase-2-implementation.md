@@ -67,6 +67,6 @@ go test -race -count=1 -run '^(TestValidateKerberosConfiguration|TestKerberosCre
 git diff --check
 ```
 
-All commands pass. No live-shell success is claimed for Phase 2. The next action
-is Phase 3: wrap outgoing SOAP, parse and unwrap protected responses, then pass
-the mandatory native HTTP hostname gate.
+All commands pass. No live-shell success was claimed for Phase 2. Phase 3 now
+wraps SOAP, unwraps protected responses, and passes the mandatory native HTTP
+hostname gate; see `phase-3-implementation.md`.

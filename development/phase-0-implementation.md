@@ -10,7 +10,7 @@ Specification: [Pure-Go WinRM design](design-pure-go-winrm.md).
 - The principal comes from repository-root `user`; the password comes from `pw`.
 - Password parsing removes exactly one terminal LF or CRLF and preserves spaces.
 - Go and Python use the same Kerberos config selected by `WINRM_KRB_CONFIG`.
-- Both standalone gates require exit code 0, stdout `win-host`, and empty stderr.
+- Both standalone gates require exit code 0, expected hostname stdout, and empty stderr.
 - The success-parity gate requires both clients to succeed. Equal failures cannot pass.
 - Equal-outcome comparison remains available only as
   `TestKerberosComparisonDiagnostic` under its own opt-in flag.
@@ -48,21 +48,21 @@ credential access.
 Python oracle:
 
 ```sh
-WINRM_HOST=win-host.example.com \
+WINRM_HOST=server.example.com \
 WINRM_KRB_CONFIG=/etc/krb5.conf KRB5_CONFIG=/etc/krb5.conf \
 WINRM_PYWINRM_INTEGRATION=1 WINRM_KRB_AUTH=password \
 WINRM_PYTHON=.venv/bin/python \
 go test -count=1 -timeout=120s -run '^TestPywinrmIntegration$' -v .
 ```
 
-Result: pass. Python 3.13.5 and pywinrm 0.5.0 connected to
-`http://win-host.example.com:5985/wsman` with automatic Kerberos
+Result: pass. Python 3.13.5 and pywinrm 0.5.0 connected to the configured HTTP
+5985 endpoint with automatic Kerberos
 message encryption and returned the expected hostname.
 
 Native expected-red gate:
 
 ```sh
-CGO_ENABLED=0 WINRM_HOST=win-host.example.com \
+CGO_ENABLED=0 WINRM_HOST=server.example.com \
 WINRM_KRB_CONFIG=/etc/krb5.conf \
 WINRM_KERBEROS_INTEGRATION=1 WINRM_KRB_AUTH=password \
 go test -count=1 -timeout=120s -run '^TestKerberosIntegration$' -v .
@@ -74,7 +74,7 @@ sends plaintext SOAP after one-shot Kerberos SPNEGO authentication.
 Success-only comparison:
 
 ```sh
-WINRM_HOST=win-host.example.com \
+WINRM_HOST=server.example.com \
 WINRM_KRB_CONFIG=/etc/krb5.conf KRB5_CONFIG=/etc/krb5.conf \
 WINRM_KERBEROS_COMPARISON=1 WINRM_KRB_AUTH=password \
 WINRM_PYTHON=.venv/bin/python \

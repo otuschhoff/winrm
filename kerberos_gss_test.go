@@ -2,6 +2,7 @@ package winrm
 
 import (
 	"bytes"
+	"encoding/binary"
 	"encoding/hex"
 	"strings"
 	"testing"
@@ -22,12 +23,16 @@ import (
 
 func TestKerberosGSSAdapterBidirectional(t *testing.T) {
 	tests := []struct {
-		name    string
-		keyType int32
-		key     []byte
+		name         string
+		keyType      int32
+		key          []byte
+		headerLength int
+		rrc          uint16
 	}{
-		{name: "AES128", keyType: 17, key: []byte("0123456789abcdef")},
-		{name: "AES256", keyType: 18, key: []byte("0123456789abcdef0123456789abcdef")},
+		{name: "AES128 SHA1", keyType: 17, key: []byte("0123456789abcdef"), headerLength: 60, rrc: 28},
+		{name: "AES256 SHA1", keyType: 18, key: []byte("0123456789abcdef0123456789abcdef"), headerLength: 60, rrc: 28},
+		{name: "AES128 SHA256", keyType: 19, key: []byte("0123456789abcdef"), headerLength: 64, rrc: 32},
+		{name: "AES256 SHA384", keyType: 20, key: []byte("0123456789abcdef0123456789abcdef"), headerLength: 72, rrc: 40},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -41,8 +46,11 @@ func TestKerberosGSSAdapterBidirectional(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				if len(header) != kerberosGSSHeaderLength || len(payload) == 0 {
+				if len(header) != test.headerLength || len(payload) != len(message) {
 					t.Fatalf("wrapped lengths = (%d, %d)", len(header), len(payload))
+				}
+				if rrc := binary.BigEndian.Uint16(header[6:8]); rrc != test.rrc {
+					t.Fatalf("wrapped RRC = %d, want %d", rrc, test.rrc)
 				}
 				plaintext, err := receiver.unwrap(header, payload)
 				if err != nil {
@@ -260,7 +268,7 @@ func newSyntheticKerberosSPNEGOExchange(t *testing.T) (*spnego.SPNEGO, *spnego.S
 		t.Fatal(err)
 	}
 	options := spnego.KRB5TokenAPREQOptions{GSSAPIFlags: []int{
-		gssapi.ContextFlagMutual, gssapi.ContextFlagInteg, gssapi.ContextFlagConf,
+		gssapi.ContextFlagMutual, gssapi.ContextFlagSequence, gssapi.ContextFlagInteg, gssapi.ContextFlagConf,
 	}}
 	initiator := spnego.SPNEGOClientWithOptions(kerberosClient, servicePrincipal, options)
 	initial, err := initiator.InitSecContext()

@@ -35,27 +35,21 @@ type kerberosComparisonResult struct {
 	Outcome        string `json:"outcome"`
 }
 
-const (
-	kerberosIntegrationHost  = "win-host.example.com"
-	kerberosExpectedHostname = "win-host"
-	kerberosIntegrationRealm = "EXAMPLE.COM"
-)
-
 func TestKerberosIntegration(t *testing.T) {
 	if os.Getenv("WINRM_KERBEROS_INTEGRATION") != "1" {
 		t.Skip("set WINRM_KERBEROS_INTEGRATION=1 to run")
 	}
 
-	host := envOrDefault("WINRM_HOST", kerberosIntegrationHost)
-	realm := envOrDefault("WINRM_KRB_REALM", kerberosIntegrationRealm)
+	host, realm, expectedHostname := kerberosIntegrationTarget(t)
 	requirePasswordMode(t)
 	username, password := passwordTestCredentials(t, realm)
 	result := runGoKerberosComparison(host, realm, username, password, "")
 	logComparisonResult(t, result)
 	if !result.Success {
+		t.Logf("native Kerberos detail: %s", result.Error)
 		t.Fatalf("native Kerberos WinRM connection failed: %s", sanitizedOutcome(result))
 	}
-	assertComparisonResult(t, result)
+	assertComparisonResult(t, result, expectedHostname)
 }
 
 func TestKerberosComparisonWithPywinrm(t *testing.T) {
@@ -63,21 +57,20 @@ func TestKerberosComparisonWithPywinrm(t *testing.T) {
 		t.Skip("set WINRM_KERBEROS_COMPARISON=1 to compare Go with pywinrm")
 	}
 
-	host := envOrDefault("WINRM_HOST", kerberosIntegrationHost)
-	realm := envOrDefault("WINRM_KRB_REALM", kerberosIntegrationRealm)
+	host, realm, expectedHostname := kerberosIntegrationTarget(t)
 	requirePasswordMode(t)
 	username, password := passwordTestCredentials(t, realm)
 	principal := username + "@" + realm
 
 	goResult := runGoKerberosComparison(host, realm, username, password, "")
-	pythonResult := runPywinrmComparison(t, host, principal, "", "password")
+	pythonResult := runPywinrmComparison(t, host, expectedHostname, principal, "", "password")
 	logComparisonResult(t, goResult)
 	logComparisonResult(t, pythonResult)
 	if !goResult.Success || !pythonResult.Success {
 		t.Fatalf("success parity requires both clients to succeed: Go=%s Python=%s", sanitizedOutcome(goResult), sanitizedOutcome(pythonResult))
 	}
-	assertComparisonResult(t, goResult)
-	assertComparisonResult(t, pythonResult)
+	assertComparisonResult(t, goResult, expectedHostname)
+	assertComparisonResult(t, pythonResult, expectedHostname)
 	if goResult.ExitCode != pythonResult.ExitCode || !strings.EqualFold(goResult.Stdout, pythonResult.Stdout) {
 		t.Fatalf("clients returned different successful command results: Go=%s Python=%s", sanitizedOutcome(goResult), sanitizedOutcome(pythonResult))
 	}
@@ -88,12 +81,11 @@ func TestKerberosComparisonDiagnostic(t *testing.T) {
 		t.Skip("set WINRM_KERBEROS_DIAGNOSTIC=1 to compare failures diagnostically")
 	}
 
-	host := envOrDefault("WINRM_HOST", kerberosIntegrationHost)
-	realm := envOrDefault("WINRM_KRB_REALM", kerberosIntegrationRealm)
+	host, realm, expectedHostname := kerberosIntegrationTarget(t)
 	authMode := envOrDefault("WINRM_KRB_AUTH", "password")
 	username, password, keytabPath := kerberosTestCredentials(t, authMode, realm)
 	goResult := runGoKerberosComparison(host, realm, username, password, keytabPath)
-	pythonResult := runPywinrmComparison(t, host, username+"@"+realm, keytabPath, authMode)
+	pythonResult := runPywinrmComparison(t, host, expectedHostname, username+"@"+realm, keytabPath, authMode)
 	logComparisonResult(t, goResult)
 	logComparisonResult(t, pythonResult)
 	if goResult.Success != pythonResult.Success || goResult.HTTPStatus != pythonResult.HTTPStatus || goResult.ErrorKind != pythonResult.ErrorKind {
@@ -106,16 +98,15 @@ func TestPywinrmIntegration(t *testing.T) {
 		t.Skip("set WINRM_PYWINRM_INTEGRATION=1 to run the pywinrm baseline")
 	}
 
-	host := envOrDefault("WINRM_HOST", kerberosIntegrationHost)
-	realm := envOrDefault("WINRM_KRB_REALM", kerberosIntegrationRealm)
+	host, realm, expectedHostname := kerberosIntegrationTarget(t)
 	requirePasswordMode(t)
 	username, _ := passwordTestCredentials(t, realm)
-	result := runPywinrmComparison(t, host, username+"@"+realm, "", "password")
+	result := runPywinrmComparison(t, host, expectedHostname, username+"@"+realm, "", "password")
 	logComparisonResult(t, result)
 	if !result.Success {
 		t.Fatalf("pywinrm baseline failed: %s", sanitizedOutcome(result))
 	}
-	assertComparisonResult(t, result)
+	assertComparisonResult(t, result, expectedHostname)
 }
 
 func runGoKerberosComparison(host, realm, username, password, keytabPath string) kerberosComparisonResult {
@@ -147,6 +138,12 @@ func runGoKerberosComparison(host, realm, username, password, keytabPath string)
 		return result
 	}
 	result.Error = err.Error()
+	var kerberosError *KerberosError
+	if errors.As(err, &kerberosError) {
+		result.HTTPStatus = kerberosError.StatusCode
+		result.ErrorKind = "kerberos-" + kerberosError.Stage
+		return result
+	}
 	if match := regexp.MustCompile(`request returned: (\d+)`).FindStringSubmatch(result.Error); len(match) == 2 {
 		result.HTTPStatus, _ = strconv.Atoi(match[1])
 	}
@@ -161,12 +158,12 @@ func runGoKerberosComparison(host, realm, username, password, keytabPath string)
 func newGoComparisonResult(host string) kerberosComparisonResult {
 	return kerberosComparisonResult{
 		Client: "go", ExitCode: -1, Endpoint: winRMEndpoint(host),
-		ProtectionMode: "kerberos-plaintext-soap-unimplemented", RuntimeVersion: runtime.Version(),
+		ProtectionMode: "kerberos-encrypted-soap", RuntimeVersion: runtime.Version(),
 		ClientVersion: gokrb5Version(), Outcome: "failure",
 	}
 }
 
-func runPywinrmComparison(t *testing.T, host, principal, keytabPath, authMode string) kerberosComparisonResult {
+func runPywinrmComparison(t *testing.T, host, expectedHostname, principal, keytabPath, authMode string) kerberosComparisonResult {
 	t.Helper()
 	python := envOrDefault("WINRM_PYTHON", "python3")
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
@@ -174,7 +171,7 @@ func runPywinrmComparison(t *testing.T, host, principal, keytabPath, authMode st
 	command := exec.CommandContext(ctx, python, filepath.Join("development", "compare_pywinrm.py"))
 	command.Env = mergeEnvironment(os.Environ(), map[string]string{
 		"KRB5_CONFIG":             envOrDefault("WINRM_KRB_CONFIG", "/etc/krb5.conf"),
-		"WINRM_EXPECTED_HOSTNAME": kerberosExpectedHostname,
+		"WINRM_EXPECTED_HOSTNAME": expectedHostname,
 		"WINRM_HOST":              host,
 		"WINRM_KRB_AUTH":          authMode,
 		"WINRM_KRB_KEYTAB":        keytabPath,
@@ -302,19 +299,19 @@ func requirePasswordMode(t *testing.T) {
 	}
 }
 
-func assertHostnameResult(t *testing.T, stdout, stderr string, exitCode int) {
+func assertHostnameResult(t *testing.T, stdout, stderr string, exitCode int, expectedHostname string) {
 	t.Helper()
-	if err := validateHostnameResult(stdout, stderr, exitCode); err != nil {
+	if err := validateHostnameResult(stdout, stderr, exitCode, expectedHostname); err != nil {
 		t.Fatal(err)
 	}
 }
 
-func validateHostnameResult(stdout, stderr string, exitCode int) error {
+func validateHostnameResult(stdout, stderr string, exitCode int, expectedHostname string) error {
 	if exitCode != 0 {
 		return fmt.Errorf("hostname exited with code %d", exitCode)
 	}
-	if actual := strings.TrimSuffix(strings.TrimSuffix(stdout, "\n"), "\r"); !strings.EqualFold(actual, kerberosExpectedHostname) {
-		return fmt.Errorf("hostname stdout mismatch: got %q, want %q", actual, kerberosExpectedHostname)
+	if actual := strings.TrimSuffix(strings.TrimSuffix(stdout, "\n"), "\r"); !strings.EqualFold(actual, expectedHostname) {
+		return fmt.Errorf("hostname stdout mismatch: got %q, want %q", actual, expectedHostname)
 	}
 	if stderr != "" {
 		return fmt.Errorf("hostname stderr must be empty, got %q", stderr)
@@ -322,9 +319,31 @@ func validateHostnameResult(stdout, stderr string, exitCode int) error {
 	return nil
 }
 
-func assertComparisonResult(t *testing.T, result kerberosComparisonResult) {
+func assertComparisonResult(t *testing.T, result kerberosComparisonResult, expectedHostname string) {
 	t.Helper()
-	assertHostnameResult(t, result.Stdout, result.Stderr, result.ExitCode)
+	assertHostnameResult(t, result.Stdout, result.Stderr, result.ExitCode, expectedHostname)
+}
+
+func kerberosIntegrationTarget(t *testing.T) (host, realm, expectedHostname string) {
+	t.Helper()
+	host = strings.TrimSpace(os.Getenv("WINRM_HOST"))
+	if host == "" {
+		encoded, err := os.ReadFile("target")
+		if err != nil {
+			t.Fatalf("read target file: %v", err)
+		}
+		host = strings.TrimSpace(string(encoded))
+	}
+	labels := strings.Split(host, ".")
+	if len(labels) < 2 || labels[0] == "" || strings.ContainsAny(host, " /\\") {
+		t.Fatalf("target must be a fully qualified DNS name")
+	}
+	expectedHostname = labels[0]
+	realm = strings.TrimSpace(os.Getenv("WINRM_KRB_REALM"))
+	if realm == "" {
+		realm = strings.ToUpper(strings.Join(labels[1:], "."))
+	}
+	return host, realm, expectedHostname
 }
 
 func winRMEndpoint(host string) string {
@@ -469,14 +488,14 @@ func TestValidateHostnameResult(t *testing.T) {
 		exitCode             int
 		wantError            string
 	}{
-		{name: "success", stdout: "win-host\r\n"},
+		{name: "success", stdout: "host\r\n"},
 		{name: "wrong hostname", stdout: "other", wantError: "stdout mismatch"},
-		{name: "stderr", stdout: "win-host", stderr: "warning", wantError: "stderr must be empty"},
-		{name: "exit code", stdout: "win-host", exitCode: 1, wantError: "exited with code 1"},
+		{name: "stderr", stdout: "host", stderr: "warning", wantError: "stderr must be empty"},
+		{name: "exit code", stdout: "host", exitCode: 1, wantError: "exited with code 1"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			err := validateHostnameResult(test.stdout, test.stderr, test.exitCode)
+			err := validateHostnameResult(test.stdout, test.stderr, test.exitCode, "host")
 			if test.wantError == "" && err != nil {
 				t.Fatal(err)
 			}

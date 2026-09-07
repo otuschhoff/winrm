@@ -6,9 +6,9 @@ This is a Go library to execute remote commands on Windows machines through
 the use of WinRM/WinRS.
 
 Kerberos authentication for domain users is available through the pluggable
-transport API. Kerberos message encryption over HTTP is not yet implemented, so
-servers that require encrypted WinRM messages are not supported by the native Go
-transport yet. See the integration gates below for current interoperability status.
+transport API. The native Go transport supports Kerberos message encryption for
+WinRM over HTTP and requires it by default when `MessageEncryption` is `auto`.
+See the integration gates below for interoperability checks.
 
 [![Build Status](https://travis-ci.org/masterzen/winrm.svg?branch=master)](https://travis-ci.org/masterzen/winrm)
 [![Coverage Status](https://coveralls.io/repos/masterzen/winrm/badge.png)](https://coveralls.io/r/masterzen/winrm)
@@ -198,7 +198,8 @@ if err != nil {
 
 The opt-in success-parity test runs `hostname` through both this Go client and
 `pywinrm`. It passes only when both clients return exit code 0, stdout
-`win-host`, and empty stderr. Matching failures do not pass.
+matching the short hostname derived from the ignored local `target` file, and
+empty stderr. Matching failures do not pass.
 Install the Python dependency in a virtual environment first:
 
 ```sh
