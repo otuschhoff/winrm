@@ -1,9 +1,10 @@
 # Pure-Go WinRM: Design and Implementation Plan
 
-Status: proposed; implementation has not started.
+Status: Phase 1 complete; Kerberos GSS context export available in gokrb5 v8.5.1.
 Date: 2026-09-07.
 
 Phase 0 is complete; see the [Phase 0 implementation note](phase-0-implementation.md).
+Phase 1 is complete; see the [Phase 1 implementation note](phase-1-implementation.md).
 
 ## 1. Goal and Release Contract
 
@@ -273,7 +274,7 @@ Tasks:
 Exit: Python live baseline passes; native success-only gate is demonstrably red;
 default tests skip all network access and do not require credential files.
 
-### Phase 1: Verify the GSS Adapter and Framing
+### Phase 1: Verify the GSS Adapter and Framing (complete)
 
 Inputs: fork SPNEGO/context APIs and documented WinRM/GSS wire formats.
 
