@@ -100,6 +100,17 @@ func (s *WinRMSuite) TestClientCreateShellPropagatesContext(c *C) {
 	c.Assert(requester.context, Equals, ctx)
 }
 
+func (s *WinRMSuite) TestDefaultTransportHonorsCanceledContext(c *C) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	endpoint := NewEndpoint("localhost", 5985, false, false, nil, nil, nil, 0)
+	client, err := NewClient(endpoint, "Administrator", "v3r1S3cre7")
+	c.Assert(err, IsNil)
+
+	_, err = client.CreateShellWithContext(ctx)
+	c.Assert(errors.Is(err, context.Canceled), Equals, true)
+}
+
 func (s *WinRMSuite) TestClientCloseDelegatesToTransport(c *C) {
 	requester := &contextRequester{}
 	client := &Client{http: requester}

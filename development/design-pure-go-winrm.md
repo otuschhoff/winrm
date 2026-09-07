@@ -1,11 +1,13 @@
 # Pure-Go WinRM: Design and Implementation Plan
 
-Status: Phase 2 complete; encrypted SOAP remains Phase 3 work.
+Status: Phase 4 complete; hardening and compatibility remain Phase 5 work.
 Date: 2026-09-07.
 
 Phase 0 is complete; see the [Phase 0 implementation note](phase-0-implementation.md).
 Phase 1 is complete; see the [Phase 1 implementation note](phase-1-implementation.md).
 Phase 2 is complete; see the [Phase 2 implementation note](phase-2-implementation.md).
+Phase 3 is complete; see the [Phase 3 implementation note](phase-3-implementation.md).
+Phase 4 is complete; see the [Phase 4 implementation note](phase-4-implementation.md).
 
 ## 1. Goal and Release Contract
 
@@ -43,13 +45,13 @@ nor matching Go/Python failures satisfies this gate. Do not enable
 server policy to make the gate pass. A missing credential file or unavailable
 host is a blocked gate, not a pass.
 
-## 2. Evidence and Current Gaps
+## 2. Evidence and Current State
 
 Repository anchors:
 
 - [kerberos.go](../kerberos.go) and [kerberos_session.go](../kerberos_session.go):
   retain credentials and an established connection-bound GSS context, bootstrap
-  with an empty POST, and reject protected SOAP until Phase 3.
+  with an empty POST, and protect SOAP using the established context.
 - [encryption.go](../encryption.go): NTLM-specific encryption implementation;
   Kerberos support is explicitly unimplemented. Do not copy its plaintext
   fallback behavior into the new Kerberos implementation.
@@ -70,13 +72,12 @@ Observed on 2026-09-07:
   do not claim an isolated experiment proved the effect of each individually.
 - The opsctl capture shows an empty HTTP bootstrap receiving 200, then
   `multipart/encrypted` SOAP exchanges receiving 200 on port 5985.
-- Native Go now verifies and retains server context establishment. The default
-  HTTP mode deliberately stops before SOAP because Phase 3 message protection
-  is not implemented yet.
+- Native Go verifies and retains server context establishment, encrypts SOAP on
+  HTTP, and reuses that context for sequential and concurrent command lifecycles.
 - The earlier machine-account keytab received 401 and has since been removed.
   Keytab authorization on this host is not a release gate.
-- Equal failures currently pass the comparison test. This is diagnostic behavior
-  only and must not be used as successful interoperability evidence.
+- The success comparison gates require both clients to succeed. Equal failures
+  are accepted only by the separately named diagnostic test.
 
 An HTTP 500 alone does not prove a server configuration defect. The successful
 encrypted Python baseline is evidence to investigate client protocol behavior.

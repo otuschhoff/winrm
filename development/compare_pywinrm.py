@@ -40,9 +40,44 @@ def result(**values):
         "runtime_version": sys.version.split()[0],
         "client_version": "unknown",
         "outcome": "failure",
+        "results": [],
     }
     output.update(values)
     return output
+
+
+def run_scenarios(session, scenarios):
+    results = []
+    protocol = session.protocol
+    try:
+        for scenario in scenarios:
+            shell_id = protocol.open_shell()
+            try:
+                command_id = protocol.run_command(shell_id, scenario["command"])
+                try:
+                    if scenario.get("send_stdin", False):
+                        protocol.send_command_input(
+                            shell_id,
+                            command_id,
+                            scenario.get("stdin", "").encode("utf-8"),
+                            end=True,
+                        )
+                    stdout, stderr, exit_code = protocol.get_command_output(shell_id, command_id)
+                finally:
+                    protocol.cleanup_command(shell_id, command_id)
+            finally:
+                protocol.close_shell(shell_id, close_session=False)
+            results.append(
+                {
+                    "name": scenario["name"],
+                    "stdout": stdout.decode("utf-8"),
+                    "stderr": stderr.decode("utf-8"),
+                    "exit_code": exit_code,
+                }
+            )
+    finally:
+        protocol.transport.close_session()
+    return results
 
 
 def main():
@@ -126,6 +161,10 @@ def main():
                 operation_timeout_sec=15,
                 read_timeout_sec=20,
             )
+            encoded_scenarios = os.environ.get("WINRM_KRB_SCENARIOS", "")
+            if encoded_scenarios:
+                results = run_scenarios(session, json.loads(encoded_scenarios))
+                return safe_result(success=True, results=results, outcome="success")
             response = session.run_cmd("hostname")
             stdout = response.std_out.decode("utf-8", errors="replace").rstrip("\r\n")
             stderr = response.std_err.decode("utf-8", errors="replace").rstrip("\r\n")

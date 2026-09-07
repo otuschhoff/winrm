@@ -1,6 +1,7 @@
 package winrm
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
 	"io"
@@ -85,10 +86,14 @@ func (c *clientRequest) Transport(endpoint *Endpoint) error {
 
 // Post make post to the winrm soap service
 func (c clientRequest) Post(client *Client, request *soap.SoapMessage) (string, error) {
+	return c.PostContext(context.Background(), client, request)
+}
+
+// PostContext makes a POST request using the caller's cancellation and deadline.
+func (c clientRequest) PostContext(ctx context.Context, client *Client, request *soap.SoapMessage) (string, error) {
 	httpClient := &http.Client{Transport: c.transport}
 
-	//nolint:noctx
-	req, err := http.NewRequest("POST", client.url, strings.NewReader(request.String()))
+	req, err := http.NewRequestWithContext(ctx, "POST", client.url, strings.NewReader(request.String()))
 	if err != nil {
 		return "", fmt.Errorf("impossible to create http request %w", err)
 	}

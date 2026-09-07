@@ -3,9 +3,15 @@ package winrm
 import (
 	"bytes"
 	"errors"
+	"io"
+	"strings"
 
 	. "gopkg.in/check.v1"
 )
+
+type shortOutputWriter struct{}
+
+func (shortOutputWriter) Write(value []byte) (int, error) { return max(0, len(value)-1), nil }
 
 func (s *WinRMSuite) TestOpenShellResponse(c *C) {
 	response := createShellResponse
@@ -97,4 +103,17 @@ func (s *WinRMSuite) TestDoneSlurpOutputResponse(c *C) {
 	c.Assert(code, Equals, 123)
 	c.Assert("", Equals, stdout.String())
 	c.Assert("", Equals, stderr.String())
+}
+
+func (s *WinRMSuite) TestSlurpOutputRejectsMalformedData(c *C) {
+	invalidBase64 := strings.Replace(outputResponse, "VGhhdCdzIGFsbCBmb2xrcyEhIQ==", "%%%", 1)
+	_, _, err := ParseSlurpOutputErrResponse(invalidBase64, io.Discard, io.Discard)
+	c.Assert(err, ErrorMatches, ".*decode stdout stream.*")
+
+	_, _, err = ParseSlurpOutputErrResponse(outputResponse, shortOutputWriter{}, io.Discard)
+	c.Assert(errors.Is(err, io.ErrShortWrite), Equals, true)
+
+	invalidExit := strings.Replace(doneCommandResponse, "<rsp:ExitCode>123</rsp:ExitCode>", "<rsp:ExitCode>invalid</rsp:ExitCode>", 1)
+	_, _, err = ParseSlurpOutputErrResponse(invalidExit, io.Discard, io.Discard)
+	c.Assert(err, ErrorMatches, ".*parse command exit code.*")
 }

@@ -94,6 +94,35 @@ func (s *WinRMSuite) TestStdinCommand(c *C) {
 	command.Wait()
 }
 
+func (s *WinRMSuite) TestStdinWriteClose(c *C) {
+	endpoint := NewEndpoint("localhost", 5985, false, false, nil, nil, nil, 0)
+	client, err := NewClient(endpoint, "Administrator", "v3r1S3cre7")
+	c.Assert(err, IsNil)
+	client.Parameters.EnvelopeSize = 1004
+	shell := &Shell{client: client, id: "SHELLID"}
+	command := &Command{client: client, shell: shell, id: "COMMANDID"}
+	command.Stdin = &commandWriter{Command: command}
+
+	var requests []string
+	r := Requester{}
+	r.http = func(client *Client, message *soap.SoapMessage) (string, error) {
+		requests = append(requests, message.String())
+		return "", nil
+	}
+	client.http = &r
+
+	written, err := command.Stdin.WriteClose([]byte("123456"))
+	c.Assert(err, IsNil)
+	c.Assert(written, Equals, 6)
+	c.Assert(requests, HasLen, 2)
+	c.Assert(requests[0], Contains, "MTIzNA==")
+	c.Assert(requests[0], Not(Contains), `End="true"`)
+	c.Assert(requests[1], Contains, "NTY=")
+	c.Assert(requests[1], Contains, `End="true"`)
+	_, err = command.Stdin.Write([]byte("later"))
+	c.Assert(err, Equals, io.ErrClosedPipe)
+}
+
 func (s *WinRMSuite) TestCommandExitCode(c *C) {
 	endpoint := NewEndpoint("localhost", 5985, false, false, nil, nil, nil, 0)
 	client, err := NewClient(endpoint, "Administrator", "v3r1S3cre7")
