@@ -26,6 +26,7 @@ type commandReader struct {
 // Command represents a given command running on a Shell. This structure allows to get access
 // to the various stdout, stderr and stdin pipes.
 type Command struct {
+	ctx      context.Context
 	client   *Client
 	shell    *Shell
 	id       string
@@ -42,6 +43,7 @@ type Command struct {
 
 func newCommand(ctx context.Context, shell *Shell, ids string) *Command {
 	command := &Command{
+		ctx:      ctx,
 		shell:    shell,
 		client:   shell.client,
 		id:       ids,
@@ -141,7 +143,7 @@ func (c *Command) slurpAllOutput() (bool, error) {
 	request := NewGetOutputRequest(c.client.url, c.shell.id, c.id, "stdout stderr", &c.client.Parameters)
 	defer request.Free()
 
-	response, err := c.client.sendRequest(request)
+	response, err := c.client.sendRequestContext(c.ctx, request)
 	if err != nil {
 		var errWithTimeout *url.Error
 		if errors.As(err, &errWithTimeout) && errWithTimeout.Timeout() {
@@ -192,7 +194,7 @@ func (c *Command) sendInput(data []byte, eof bool) error {
 	request := NewSendInputRequest(c.client.url, c.shell.id, c.id, data, eof, &c.client.Parameters)
 	defer request.Free()
 
-	_, err := c.client.sendRequest(request)
+	_, err := c.client.sendRequestContext(c.ctx, request)
 	return err
 }
 

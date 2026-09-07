@@ -77,10 +77,15 @@ func readCACerts(certs []byte) (*x509.CertPool, error) {
 // CreateShell will create a WinRM Shell,
 // which is the prealable for running commands.
 func (c *Client) CreateShell() (*Shell, error) {
+	return c.CreateShellWithContext(context.Background())
+}
+
+// CreateShellWithContext creates a WinRM shell using the supplied request context.
+func (c *Client) CreateShellWithContext(ctx context.Context) (*Shell, error) {
 	request := NewOpenShellRequest(c.url, &c.Parameters)
 	defer request.Free()
 
-	response, err := c.sendRequest(request)
+	response, err := c.sendRequestContext(ctx, request)
 	if err != nil {
 		return nil, err
 	}
@@ -100,7 +105,30 @@ func (c *Client) NewShell(id string) *Shell {
 
 // sendRequest exec the custom http func from the client
 func (c *Client) sendRequest(request *soap.SoapMessage) (string, error) {
+	return c.sendRequestContext(context.Background(), request)
+}
+
+type contextTransporter interface {
+	PostContext(context.Context, *Client, *soap.SoapMessage) (string, error)
+}
+
+type closeTransporter interface {
+	Close() error
+}
+
+func (c *Client) sendRequestContext(ctx context.Context, request *soap.SoapMessage) (string, error) {
+	if transport, ok := c.http.(contextTransporter); ok {
+		return transport.PostContext(ctx, c, request)
+	}
 	return c.http.Post(c, request)
+}
+
+// Close releases resources held by transports that require explicit cleanup.
+func (c *Client) Close() error {
+	if transport, ok := c.http.(closeTransporter); ok {
+		return transport.Close()
+	}
+	return nil
 }
 
 // Run will run command on the the remote host, writing the process stdout and stderr to
@@ -201,7 +229,7 @@ func (c *Client) RunWithInput(command string, stdout, stderr io.Writer, stdin io
 // performance reasons to buffer it.
 // If stdin is nil, this is equivalent to c.RunWithContext()
 func (c *Client) RunWithContextWithInput(ctx context.Context, command string, stdout, stderr io.Writer, stdin io.Reader) (int, error) {
-	shell, err := c.CreateShell()
+	shell, err := c.CreateShellWithContext(ctx)
 	if err != nil {
 		return 1, err
 	}
