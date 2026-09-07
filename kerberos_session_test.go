@@ -84,6 +84,37 @@ func TestKerberosCredentialPrecedence(t *testing.T) {
 	kerberosClient.Destroy()
 }
 
+func TestKerberosCredentialSourceErrors(t *testing.T) {
+	validConfigPath := t.TempDir() + "/krb5.conf"
+	configuration := "[libdefaults]\n default_realm = EXAMPLE.TEST\n[realms]\n EXAMPLE.TEST = {\n  kdc = 127.0.0.1\n }\n"
+	if err := os.WriteFile(validConfigPath, []byte(configuration), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	invalidCredentialPath := t.TempDir() + "/invalid"
+	if err := os.WriteFile(invalidCredentialPath, []byte("not a Kerberos credential"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	tests := []struct {
+		name, configPath, ccachePath, keytabPath, want string
+	}{
+		{name: "missing config", configPath: t.TempDir() + "/missing", want: "configuration"},
+		{name: "malformed ccache", configPath: validConfigPath, ccachePath: invalidCredentialPath, want: "parse ccache"},
+		{name: "malformed keytab", configPath: validConfigPath, keytabPath: invalidCredentialPath, want: "keytab"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := newKerberosCredentialClient(&ClientKerberos{
+				Username: "user", Password: "password", Realm: "EXAMPLE.TEST", KrbConf: test.configPath,
+				KrbCCache: test.ccachePath, KrbKeytab: test.keytabPath,
+			})
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("credential error = %v, want containing %q", err, test.want)
+			}
+		})
+	}
+}
+
 func TestKerberosSessionBootstrapAndReuse(t *testing.T) {
 	connection := &fixtureConnection{id: "one"}
 	transport := &scriptedKerberosTransport{steps: []kerberosHTTPFixture{
@@ -323,6 +354,26 @@ func TestKerberosSessionPostModesAndConnectionLoss(t *testing.T) {
 	}
 }
 
+func TestKerberosPlaintextResponseRejectsDisguisedContentType(t *testing.T) {
+	connection := &fixtureConnection{id: "content-type"}
+	transport := &scriptedKerberosTransport{steps: []kerberosHTTPFixture{
+		{status: http.StatusOK, connection: connection},
+		{status: http.StatusOK, connection: connection, contentType: `text/plain;note="application/soap+xml"`, body: "<response/>"},
+	}}
+	session := newFixtureKerberosSession(transport, func(client *http.Client) kerberosNegotiator {
+		return &fixtureKerberosNegotiator{client: client, rounds: 1, context: fixtureSecurityContext(t)}
+	})
+
+	_, err := session.post(context.Background(), "<soap/>", 1024)
+	var kerberosError *KerberosError
+	if !errors.As(err, &kerberosError) || kerberosError.Stage != "soap" {
+		t.Fatalf("content-type error = %#v, want SOAP-stage Kerberos error", err)
+	}
+	if session.state != kerberosSessionInvalid {
+		t.Fatalf("session state = %d, want invalid", session.state)
+	}
+}
+
 func TestKerberosSessionEncryptedResponseHandling(t *testing.T) {
 	t.Run("authenticated SOAP fault", func(t *testing.T) {
 		session, transport := newEncryptedFixtureSession(t, executeCommandResponseWithError)
@@ -369,8 +420,60 @@ func TestKerberosSessionEncryptedResponseHandling(t *testing.T) {
 	}
 }
 
+func TestKerberosPlaintextResponseReadHonorsDeadline(t *testing.T) {
+	connection := &fixtureConnection{id: "deadline"}
+	body := &contextResponseBody{}
+	transport := roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		if trace := httptrace.ContextClientTrace(request.Context()); trace != nil && trace.GotConn != nil {
+			trace.GotConn(httptrace.GotConnInfo{Conn: connection})
+		}
+		body.context = request.Context()
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header:     http.Header{"Content-Type": []string{soapXML}},
+			Body:       body,
+			Request:    request,
+		}, nil
+	})
+	session := &kerberosSession{
+		state: kerberosSessionEstablished, endpoint: "http://host.example.test:5985/wsman",
+		connection: connection, httpClient: &http.Client{Transport: transport},
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	_, err := session.post(ctx, "<soap/>", 1024)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("response read error = %v, want deadline exceeded", err)
+	}
+	if session.state != kerberosSessionInvalid || !body.closed {
+		t.Fatalf("response failure state/closed = %d/%t, want invalid/true", session.state, body.closed)
+	}
+}
+
 type expiredKerberosContext struct {
 	gssapi.Context
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (function roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return function(request)
+}
+
+type contextResponseBody struct {
+	context context.Context
+	closed  bool
+}
+
+func (body *contextResponseBody) Read([]byte) (int, error) {
+	<-body.context.Done()
+	return 0, body.context.Err()
+}
+
+func (body *contextResponseBody) Close() error {
+	body.closed = true
+	return nil
 }
 
 func (expiredKerberosContext) Wrap([]byte, bool) ([]byte, error) {

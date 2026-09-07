@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/http/httptrace"
@@ -293,12 +294,15 @@ func (session *kerberosSession) postPlaintextLocked(ctx context.Context, message
 		return "", &KerberosError{Stage: "http", Err: errors.New("Kerberos HTTP connection changed; SOAP was not replayed")}
 	}
 	if readErr != nil {
+		session.invalidateLocked()
 		return "", &KerberosError{Stage: "http", StatusCode: response.StatusCode, Err: readErr}
 	}
 	if response.StatusCode != http.StatusOK {
 		return "", &KerberosError{Stage: "http", StatusCode: response.StatusCode, Err: errors.New("WinRM request failed")}
 	}
-	if !strings.Contains(response.Header.Get("Content-Type"), soapXML) {
+	mediaType, _, contentTypeErr := mime.ParseMediaType(response.Header.Get("Content-Type"))
+	if contentTypeErr != nil || !strings.EqualFold(mediaType, soapXML) {
+		session.invalidateLocked()
 		return "", &KerberosError{Stage: "soap", StatusCode: response.StatusCode, Err: errors.New("invalid plaintext response content type")}
 	}
 	return string(body), nil

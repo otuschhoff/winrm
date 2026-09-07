@@ -108,6 +108,24 @@ func TestKerberosGSSAdapterRejectsInvalidHeaders(t *testing.T) {
 	}
 }
 
+func FuzzKerberosGSSAdapterUnwrap(f *testing.F) {
+	f.Add(fixtureKerberosGSSHeader(), []byte("payload"))
+	f.Add([]byte{0x05, 0x04}, []byte{})
+	f.Fuzz(func(t *testing.T, header, payload []byte) {
+		if len(header)+len(payload) > 1<<20 {
+			t.Skip()
+		}
+		context := &fixtureKerberosGSSContext{
+			header: fixtureKerberosGSSHeader(), payload: fixtureKerberosGSSBody([]byte("payload")), message: []byte("message"),
+		}
+		adapter, err := newKerberosGSSAdapter(context)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = adapter.unwrap(header, payload)
+	})
+}
+
 func TestKerberosGSSAdapterEnctypesSequencesAndSubkeys(t *testing.T) {
 	tests := []struct {
 		name    string

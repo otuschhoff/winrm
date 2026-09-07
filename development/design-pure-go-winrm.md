@@ -1,6 +1,6 @@
 # Pure-Go WinRM: Design and Implementation Plan
 
-Status: Phase 4 complete; hardening and compatibility remain Phase 5 work.
+Status: Phase 5 complete; release evidence remains Phase 6 work.
 Date: 2026-09-07.
 
 Phase 0 is complete; see the [Phase 0 implementation note](phase-0-implementation.md).
@@ -8,6 +8,7 @@ Phase 1 is complete; see the [Phase 1 implementation note](phase-1-implementatio
 Phase 2 is complete; see the [Phase 2 implementation note](phase-2-implementation.md).
 Phase 3 is complete; see the [Phase 3 implementation note](phase-3-implementation.md).
 Phase 4 is complete; see the [Phase 4 implementation note](phase-4-implementation.md).
+Phase 5 is complete; see the [Phase 5 implementation note](phase-5-implementation.md).
 
 ## 1. Goal and Release Contract
 

@@ -21,7 +21,7 @@ See the integration gates below for interoperability checks.
 ## Getting Started
 WinRM is available on Windows Server 2008 and up. This project natively supports basic authentication for local accounts, see the steps in the next section on how to prepare the remote Windows machine for this scenario. The authentication model is pluggable, see below for an example on using Negotiate/NTLM authentication (e.g. for connecting to vanilla Azure VMs) or Kerberos authentication (using domain accounts).
 
-_Note_: This library only supports Golang 1.7+
+The current module requires Go 1.26 or newer.
 
 ### Preparing the remote Windows machine for Basic authentication
 This basic-authentication setup supports local accounts only. The remote windows system must be prepared for winrm:
@@ -51,7 +51,6 @@ On the remote host, a PowerShell prompt, using the __Run as Administrator__ opti
 
                 winrm quickconfig
                 y
-                winrm set winrm/config/service '@{AllowUnencrypted="true"}'
                 winrm set winrm/config/winrs '@{MaxMemoryPerShellMB="1024"}'
 
 All __N.B__ points of "Preparing the remote Windows machine for Basic authentication" also applies.
@@ -69,7 +68,7 @@ make
 
 _Note_: this winrm code doesn't depend anymore on [Gokogiri](https://github.com/moovweb/gokogiri) which means it is now in pure Go.
 
-_Note_: you need go 1.5+. Please check your installation with
+Check your Go installation with:
 
 ```
 go version
@@ -184,6 +183,7 @@ client, err := NewClientWithParameters(endpoint, "test", "s3cr3t", params)
 if err != nil {
         panic(err)
 }
+defer client.Close()
 
 ctx, cancel := context.WithCancel(context.Background())
 defer cancel()
@@ -193,6 +193,48 @@ if err != nil {
 }
 
 ```
+
+### Kerberos security and compatibility
+
+`MessageEncryption` accepts the following values:
+
+| Value | Behavior |
+| --- | --- |
+| `""` or `auto` | Encrypt WinRM SOAP over HTTP; rely on certificate-verified TLS over HTTPS. This is the default. |
+| `always` | Encrypt WinRM SOAP over both HTTP and HTTPS. |
+| `never` | Send SOAP without GSS message encryption. This is an explicit compatibility or diagnostic opt-out and is never selected as an error fallback. |
+
+For installations upgrading from plaintext Kerberos over HTTP, first verify
+that the server accepts encrypted WinRM messages, then leave
+`MessageEncryption` empty or set it to `auto`. Use `never` only as a temporary,
+explicit compatibility setting. Authentication, integrity, or decryption
+failures never trigger plaintext retry.
+
+The initialized `Endpoint` controls the request URL and TLS settings. A custom
+CA verifies private HTTPS certificates; `Insecure` explicitly disables
+certificate verification. Legacy Kerberos host, port, or protocol fields that
+conflict with the endpoint are rejected. The default SPN is
+`HTTP/<endpoint-host>`. Credential source precedence is ccache, keytab, then
+password, with no fallback after authentication failure.
+
+Call `Client.Close` when the client is no longer needed so active commands are
+cancelled and Kerberos credentials and idle connections are released. Command
+and shell cleanup is bounded to five seconds. A stdin reader that can block
+must implement `io.Closer` for context cancellation to interrupt its read.
+`NewClientKerberosWithDial` and `NewClientKerberosWithProxyFunc` provide custom
+network routing without changing SPN derivation.
+
+Protected request plaintext is limited by `Parameters.EnvelopeSize`. Kerberos
+framing additionally permits at most 256 bytes of GSS wrap overhead and 4096
+bytes of multipart metadata; SPNEGO bootstrap is limited to five HTTP
+exchanges. Responses are bounded by the envelope size and caller/endpoint
+deadlines.
+
+The native transport supports password, keytab, and ccache credentials with
+mutual SPNEGO authentication and AES RFC 4121 message protection. It does not
+provide credential delegation, channel binding, automatic authentication-mode
+fallback, or RC4 GSS message protection. Python and system Kerberos tools are
+used only by opt-in comparison tests, not by production code.
 
 ### Kerberos integration comparison
 

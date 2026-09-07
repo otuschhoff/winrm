@@ -4,13 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
+	"net/url"
 
 	"github.com/masterzen/winrm/soap"
 )
 
 const (
+	// KerberosEncryptionAuto seals SOAP on HTTP and relies on TLS on HTTPS.
 	KerberosEncryptionAuto   = "auto"
+	// KerberosEncryptionAlways seals SOAP on both HTTP and HTTPS.
 	KerberosEncryptionAlways = "always"
+	// KerberosEncryptionNever explicitly disables GSS message encryption.
 	KerberosEncryptionNever  = "never"
 )
 
@@ -62,6 +68,20 @@ func NewClientKerberos(settings *Settings) *ClientKerberos {
 		SPN:               settings.KrbSpn,
 		MessageEncryption: settings.KrbMessageEncryption,
 	}
+}
+
+// NewClientKerberosWithDial creates a Kerberos transport using a custom dialer.
+func NewClientKerberosWithDial(settings *Settings, dial func(network, addr string) (net.Conn, error)) *ClientKerberos {
+	transport := NewClientKerberos(settings)
+	transport.dial = dial
+	return transport
+}
+
+// NewClientKerberosWithProxyFunc creates a Kerberos transport using a custom proxy selector.
+func NewClientKerberosWithProxyFunc(settings *Settings, proxyfunc func(*http.Request) (*url.URL, error)) *ClientKerberos {
+	transport := NewClientKerberos(settings)
+	transport.proxyfunc = proxyfunc
+	return transport
 }
 
 func (c *ClientKerberos) Transport(endpoint *Endpoint) error {
