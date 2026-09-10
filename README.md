@@ -19,7 +19,7 @@ See the integration gates below for interoperability checks.
 
 
 ## Getting Started
-WinRM is available on Windows Server 2008 and up. This project natively supports basic authentication for local accounts, see the steps in the next section on how to prepare the remote Windows machine for this scenario. The authentication model is pluggable, see below for an example on using Negotiate/NTLM authentication (e.g. for connecting to vanilla Azure VMs) or Kerberos authentication (using domain accounts).
+WinRM is available on Windows Server 2008 and up. This project natively supports basic authentication for local accounts, certificate authentication, and Kerberos authentication for domain accounts.
 
 The current module requires Go 1.26 or newer.
 
@@ -126,49 +126,14 @@ if err != nil {
 
 ```
 
-By passing a TransportDecorator in the Parameters struct it is possible to use different Transports (e.g. NTLM)
+By passing a TransportDecorator in the Parameters struct it is possible to use different transports.
 
-The built-in default, NTLM, certificate, and Kerberos transports honor caller
+The built-in default, certificate, and Kerberos transports honor caller
 contexts and endpoint timeouts across response-body reads. `Client.Close`
 releases their idle HTTP connections. A third-party `Transporter` that only
 implements `Post` remains supported for compatibility, but cannot receive the
 caller context; implement `PostContext` and `Close` to provide cancellation and
 resource cleanup.
-
-```go
-package main
-import (
-  "github.com/otuschhoff/winrm"
-  "fmt"
-  "os"
-)
-
-endpoint := winrm.NewEndpoint("localhost", 5985, false, false, nil, nil, nil, 0)
-
-params := DefaultParameters
-params.TransportDecorator = func() Transporter { return &ClientNTLM{} }
-
-client, err := NewClientWithParameters(endpoint, "test", "test", params)
-if err != nil {
-	panic(err)
-}
-
-_, err := client.RunWithInput("ipconfig", os.Stdout, os.Stderr, os.Stdin)
-if err != nil {
-	panic(err)
-}
-
-```
-
-The legacy `Encryption` decorator supports NTLM message encryption only. It
-fails closed: an authentication/bootstrap error does not retry the SOAP request
-through an unencrypted transport, and an encrypted exchange rejects plaintext
-responses. This compatibility transport does not yet provide the response-size,
-malformed-framing, context-cancellation, custom routing/TLS, or concurrent-use
-guarantees of the native Kerberos transport. Do not share one `Encryption`
-instance across concurrent requests. Prefer certificate-verified HTTPS with
-`ClientNTLM`, or the native Kerberos transport when message encryption over HTTP
-is required.
 
 Passing a TransportDecorator also permit to use Kerberos authentication
 
@@ -248,9 +213,11 @@ exchanges. Responses are bounded by the envelope size and caller/endpoint
 deadlines.
 
 The native transport supports password, keytab, and ccache credentials with
-mutual SPNEGO authentication and AES RFC 4121 message protection. It does not
-provide credential delegation, channel binding, automatic authentication-mode
-fallback, or RC4 GSS message protection. Python and system Kerberos tools are
+mutual SPNEGO authentication and AES RFC 4121 message protection. Kerberos
+ticket requests and permitted enctypes are restricted to AES128 and AES256
+(enctypes 17-20); non-AES ccache session keys are rejected and non-AES keytab
+entries are ignored. It does not provide credential delegation, channel binding,
+or automatic authentication-mode fallback. Python and system Kerberos tools are
 used only by opt-in comparison tests, not by production code.
 
 ### Diagnostic output safety
@@ -273,7 +240,7 @@ The environment diagnostics use these controls:
 
 Safe JSONL records retain byte counts, protocol metadata, and parsed GSS header
 details, but omit `body_base64` and `body_text`. Unsafe output can contain
-password-derived authorization values, Kerberos/NTLM tokens, commands, stdin,
+password-derived authorization values, Kerberos tokens, commands, stdin,
 stdout, and stderr. Restrict access, retention, and transfer of these files; do
 not attach unsafe captures to public issues or CI artifacts.
 
