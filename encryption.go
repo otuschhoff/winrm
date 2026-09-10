@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -93,15 +94,21 @@ func (e *Encryption) Post(client *Client, message *soap.SoapMessage) (string, er
 		userName = client.username
 	}
 
-	e.ntlmClient, _ = ntlmssp.NewClient(ntlmssp.SetUserInfo(userName, client.password), ntlmssp.SetDomain(domain), ntlmssp.SetVersion(ntlmssp.DefaultVersion()))
-	e.ntlmhttp, _ = ntlmhttp.NewClient(e.httpClient, e.ntlmClient)
-
-	var err error
-	if err = e.PrepareRequest(client, client.url); err == nil {
-		return e.PrepareEncryptedRequest(client, client.url, []byte(message.String()))
-	} else {
-		return e.ntlm.Post(client, message)
+	ntlmClient, err := ntlmssp.NewClient(ntlmssp.SetUserInfo(userName, client.password), ntlmssp.SetDomain(domain), ntlmssp.SetVersion(ntlmssp.DefaultVersion()))
+	if err != nil {
+		return "", fmt.Errorf("create encrypted NTLM client: %w", err)
 	}
+	ntlmHTTPClient, err := ntlmhttp.NewClient(e.httpClient, ntlmClient)
+	if err != nil {
+		return "", fmt.Errorf("create encrypted NTLM HTTP client: %w", err)
+	}
+	e.ntlmClient = ntlmClient
+	e.ntlmhttp = ntlmHTTPClient
+
+	if err := e.PrepareRequest(client, client.url); err != nil {
+		return "", fmt.Errorf("prepare encrypted NTLM session: %w", err)
+	}
+	return e.PrepareEncryptedRequest(client, client.url, []byte(message.String()))
 }
 
 func (e *Encryption) PrepareRequest(client *Client, endpoint string) error {
@@ -161,12 +168,18 @@ func (e *Encryption) PrepareEncryptedRequest(client *Client, endpoint string, me
 			message_chunks = append(message_chunks, message[i:i+sixTenKB])
 		}
 		for _, message_chunk := range message_chunks {
-			encrypted_chunk := e.encryptMessage(message_chunk, host)
+			encrypted_chunk, err := e.encryptMessage(message_chunk, host)
+			if err != nil {
+				return "", err
+			}
 			encrypted_message = append(encrypted_message, encrypted_chunk...)
 		}
 	} else {
 		content_type = "multipart/encrypted"
-		encrypted_message = e.encryptMessage(message, host)
+		encrypted_message, err = e.encryptMessage(message, host)
+		if err != nil {
+			return "", err
+		}
 	}
 
 	encrypted_message = append(encrypted_message, []byte(mimeBoundary)...)
@@ -199,20 +212,29 @@ Takes in the encrypted response from the server and decrypts it
 :return: The unencrypted message from the server
 */
 func (e *Encryption) ParseEncryptedResponse(response *http.Response) ([]byte, error) {
+	if response == nil || response.Body == nil {
+		return nil, errors.New("encrypted NTLM response body is missing")
+	}
+	defer response.Body.Close()
 	contentType := response.Header.Get("Content-Type")
-	if strings.Contains(contentType, fmt.Sprintf(`protocol="%s"`, e.protocolString)) {
-		return e.decryptResponse(response, response.Request.URL.Hostname())
-	}
-	body, err := io.ReadAll(response.Body)
-	response.Body.Close()
+	mediaType, parameters, err := mime.ParseMediaType(contentType)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("parse encrypted NTLM response content type: %w", err)
 	}
-	return body, nil
+	if !strings.EqualFold(mediaType, "multipart/encrypted") || !strings.EqualFold(parameters["protocol"], string(e.protocolString)) {
+		return nil, fmt.Errorf("unexpected encrypted NTLM response content type %q", contentType)
+	}
+	if response.Request == nil || response.Request.URL == nil {
+		return nil, errors.New("encrypted NTLM response request URL is missing")
+	}
+	return e.decryptResponse(response, response.Request.URL.Hostname())
 }
 
-func (e *Encryption) encryptMessage(message []byte, host string) []byte {
-	encryptedStream, _ := e.buildMessage(message, host)
+func (e *Encryption) encryptMessage(message []byte, host string) ([]byte, error) {
+	encryptedStream, err := e.buildMessage(message, host)
+	if err != nil {
+		return nil, fmt.Errorf("encrypt NTLM message: %w", err)
+	}
 
 	messagePayload := bytes.Join([][]byte{
 		[]byte(mimeBoundary),
@@ -225,7 +247,7 @@ func (e *Encryption) encryptMessage(message []byte, host string) []byte {
 		encryptedStream,
 	}, []byte{})
 
-	return messagePayload
+	return messagePayload, nil
 }
 
 func deleteEmpty(b [][]byte) [][]byte {
@@ -354,7 +376,7 @@ func (e *Encryption) buildMessage(encryptedData []byte, host string) ([]byte, er
 
 func (enc *Encryption) buildNTLMMessage(message []byte, host string) ([]byte, error) {
 	if enc.ntlmClient.SecuritySession() == nil {
-		return nil, nil
+		return nil, errors.New("encrypted NTLM security session is not established")
 	}
 	sealedMessage, signature, err := enc.ntlmClient.SecuritySession().Wrap(message)
 	if err != nil {

@@ -3,7 +3,7 @@ module github.com/otuschhoff/winrm
 go 1.26.0
 
 require (
-	github.com/Azure/go-ntlmssp v0.0.0-20221128193559-754e69321358
+	github.com/Azure/go-ntlmssp v0.1.1
 	github.com/ChrisTrenkamp/goxpath v0.0.0-20210404020558-97928f7e12b6
 	github.com/bodgit/ntlmssp v0.0.0-20240506230425-31973bb52d9b
 	github.com/gofrs/uuid v4.4.0+incompatible

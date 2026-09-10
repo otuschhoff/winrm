@@ -14,6 +14,7 @@ import (
 )
 
 var httpDebugEnabled atomic.Bool
+var httpDebugUnsafe atomic.Bool
 var httpDebugCounter atomic.Uint64
 
 // SetHTTPDebug enables or disables verbose HTTP request/response logging.
@@ -26,29 +27,41 @@ func HTTPDebugEnabled() bool {
 	return httpDebugEnabled.Load()
 }
 
+// SetHTTPDebugUnsafe controls whether HTTP debugging includes raw headers and bodies.
+// Unsafe output can contain credentials, commands, and command output.
+func SetHTTPDebugUnsafe(enabled bool) {
+	httpDebugUnsafe.Store(enabled)
+}
+
+// HTTPDebugUnsafeEnabled reports whether raw HTTP debugging is enabled.
+func HTTPDebugUnsafeEnabled() bool {
+	return httpDebugUnsafe.Load() || winrmUnsafeDebugEnabled()
+}
+
 func debugHTTPRoundTrip(req *http.Request, resp *http.Response, err error) {
 	if !HTTPDebugEnabled() {
 		return
 	}
 	id := httpDebugCounter.Add(1)
+	unsafe := HTTPDebugUnsafeEnabled()
 
 	fmt.Fprintf(os.Stderr, "[DEBUG][HTTP][%d] ---- request ----\n", id)
 	if req == nil {
 		fmt.Fprintf(os.Stderr, "[DEBUG][HTTP][%d] <nil request>\n", id)
 	} else {
-		fmt.Fprintf(os.Stderr, "[DEBUG][HTTP][%d] %s %s\n", id, req.Method, req.URL.String())
-		dumpHeaders(id, req.Header)
+		fmt.Fprintf(os.Stderr, "[DEBUG][HTTP][%d] %s %s\n", id, req.Method, debugURL(req.URL, unsafe))
+		dumpHeaders(id, req.Header, unsafe)
 		if body, bodyErr := readRequestBodyForDebug(req); bodyErr != nil {
-			fmt.Fprintf(os.Stderr, "[DEBUG][HTTP][%d] request-body-error: %v\n", id, bodyErr)
+			fmt.Fprintf(os.Stderr, "[DEBUG][HTTP][%d] request-body-error: %s\n", id, formatDebugError(bodyErr, unsafe))
 		} else {
 			fmt.Fprintf(os.Stderr, "[DEBUG][HTTP][%d] request-body-bytes=%d\n", id, len(body))
-			dumpDebugBody(id, body)
+			dumpDebugBody(id, body, unsafe)
 		}
 	}
 
 	fmt.Fprintf(os.Stderr, "[DEBUG][HTTP][%d] ---- response ----\n", id)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "[DEBUG][HTTP][%d] roundtrip-error: %v\n", id, err)
+		fmt.Fprintf(os.Stderr, "[DEBUG][HTTP][%d] roundtrip-error: %s\n", id, formatDebugError(err, unsafe))
 	}
 	if resp == nil {
 		fmt.Fprintf(os.Stderr, "[DEBUG][HTTP][%d] <nil response>\n", id)
@@ -57,19 +70,23 @@ func debugHTTPRoundTrip(req *http.Request, resp *http.Response, err error) {
 	}
 
 	fmt.Fprintf(os.Stderr, "[DEBUG][HTTP][%d] status=%s\n", id, resp.Status)
-	dumpHeaders(id, resp.Header)
+	dumpHeaders(id, resp.Header, unsafe)
 	body, bodyErr := readAndRestoreResponseBody(resp)
 	if bodyErr != nil {
-		fmt.Fprintf(os.Stderr, "[DEBUG][HTTP][%d] response-body-error: %v\n", id, bodyErr)
+		fmt.Fprintf(os.Stderr, "[DEBUG][HTTP][%d] response-body-error: %s\n", id, formatDebugError(bodyErr, unsafe))
 	} else {
 		fmt.Fprintf(os.Stderr, "[DEBUG][HTTP][%d] response-body-bytes=%d\n", id, len(body))
-		dumpDebugBody(id, body)
+		dumpDebugBody(id, body, unsafe)
 	}
 	fmt.Fprintf(os.Stderr, "[DEBUG][HTTP][%d] -----------------\n", id)
 }
 
-func dumpDebugBody(id uint64, body []byte) {
-	for _, line := range strings.Split(formatDebugBody(body), "\n") {
+func dumpDebugBody(id uint64, body []byte, unsafe bool) {
+	formatter := formatDebugBody
+	if unsafe {
+		formatter = formatDebugBodyUnsafe
+	}
+	for _, line := range strings.Split(formatter(body), "\n") {
 		fmt.Fprintf(os.Stderr, "[DEBUG][HTTP][%d] body: %s\n", id, line)
 	}
 }
@@ -80,6 +97,13 @@ func formatDebugBody(body []byte) string {
 	}
 	if looksLikeEncryptedWinRMPayload(body) {
 		return summarizeEncryptedWinRMPayload(body)
+	}
+	return fmt.Sprintf("<redacted bytes=%d>", len(body))
+}
+
+func formatDebugBodyUnsafe(body []byte) string {
+	if len(body) == 0 {
+		return "<empty>"
 	}
 
 	var formatted strings.Builder
@@ -106,6 +130,13 @@ func formatDebugBody(body []byte) string {
 		}
 	}
 	return formatted.String()
+}
+
+func formatDebugError(err error, unsafe bool) string {
+	if unsafe {
+		return err.Error()
+	}
+	return fmt.Sprintf("<redacted %T>", err)
 }
 
 func looksLikeEncryptedWinRMPayload(body []byte) bool {
@@ -160,7 +191,7 @@ func readAndRestoreResponseBody(resp *http.Response) ([]byte, error) {
 	return body, nil
 }
 
-func dumpHeaders(id uint64, headers http.Header) {
+func dumpHeaders(id uint64, headers http.Header, unsafe bool) {
 	if len(headers) == 0 {
 		fmt.Fprintf(os.Stderr, "[DEBUG][HTTP][%d] headers: <empty>\n", id)
 		return
@@ -170,7 +201,8 @@ func dumpHeaders(id uint64, headers http.Header) {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
+	redacted := cloneHTTPHeaders(headers, unsafe)
 	for _, key := range keys {
-		fmt.Fprintf(os.Stderr, "[DEBUG][HTTP][%d] %s: %s\n", id, key, strings.Join(headers[key], ", "))
+		fmt.Fprintf(os.Stderr, "[DEBUG][HTTP][%d] %s: %s\n", id, key, strings.Join(redacted[key], ", "))
 	}
 }
