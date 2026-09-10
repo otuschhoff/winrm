@@ -560,9 +560,45 @@ func TestKerberosSessionCloseIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestKerberosSessionCanceledWaiterDoesNotBlock(t *testing.T) {
+	session := &kerberosSession{}
+	if err := session.acquire(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer session.release()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	started := time.Now()
+
+	_, err := session.post(ctx, "<soap/>", 1024)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("queued post error = %v, want context canceled", err)
+	}
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("canceled queued post returned after %s", elapsed)
+	}
+}
+
+func TestKerberosSessionCloseHonorsContextWhileBusy(t *testing.T) {
+	session := &kerberosSession{}
+	if err := session.acquire(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	defer session.release()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+
+	err := session.closeWithContext(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("close error = %v, want deadline exceeded", err)
+	}
+}
+
 func (session *kerberosSession) establishForTest() error {
-	session.mu.Lock()
-	defer session.mu.Unlock()
+	if err := session.acquire(context.Background()); err != nil {
+		return err
+	}
+	defer session.release()
 	return session.establishLocked(context.Background())
 }
 

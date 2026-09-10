@@ -16,15 +16,31 @@ import (
 // Client struct
 type Client struct {
 	Parameters
-	username       string
-	password       string
-	useHTTPS       bool
-	url            string
-	http           Transporter
-	lifecycleMu    sync.Mutex
-	activeCommands map[*Command]struct{}
-	closed         bool
+	username         string
+	password         string
+	useHTTPS         bool
+	url              string
+	http             Transporter
+	lifecycleMu      sync.Mutex
+	lifecycleOnce    sync.Once
+	closeOnce        sync.Once
+	closeDone        chan struct{}
+	closeErr         error
+	lifecycleState   clientLifecycleState
+	nextOperation    uint64
+	operationsDone   chan struct{}
+	operationCancels map[uint64]context.CancelFunc
+	activeCommands   map[*Command]struct{}
+	activeShells     map[*Shell]struct{}
 }
+
+type clientLifecycleState uint8
+
+const (
+	clientOpen clientLifecycleState = iota
+	clientClosing
+	clientClosed
+)
 
 // Transporter does different transporters
 // and init a Post request based on them
@@ -53,6 +69,7 @@ func NewClientWithParameters(endpoint *Endpoint, user, password string, params *
 		// default transport
 		http: &clientRequest{dial: params.Dial},
 	}
+	client.initLifecycle()
 
 	// switch to other transport if provided
 	if params.TransportDecorator != nil {
@@ -85,10 +102,15 @@ func (c *Client) CreateShell() (*Shell, error) {
 
 // CreateShellWithContext creates a WinRM shell using the supplied request context.
 func (c *Client) CreateShellWithContext(ctx context.Context) (*Shell, error) {
+	operationContext, finishOperation, err := c.beginOperation(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer finishOperation()
 	request := NewOpenShellRequest(c.url, &c.Parameters)
 	defer request.Free()
 
-	response, err := c.sendRequestContext(ctx, request)
+	response, err := c.sendRequestContext(operationContext, request)
 	if err != nil {
 		return nil, err
 	}
@@ -98,12 +120,35 @@ func (c *Client) CreateShellWithContext(ctx context.Context) (*Shell, error) {
 		return nil, err
 	}
 
-	return c.NewShell(shellID), nil
+	return c.newOwnedShell(shellID)
 }
 
 // NewShell will create a new WinRM Shell for the given shellID
 func (c *Client) NewShell(id string) *Shell {
-	return &Shell{client: c, id: id}
+	c.initLifecycle()
+	shell := newShell(c, id)
+	c.lifecycleMu.Lock()
+	if c.lifecycleState == clientOpen {
+		c.activeShells[shell] = struct{}{}
+	} else {
+		shell.closed = true
+	}
+	c.lifecycleMu.Unlock()
+	return shell
+}
+
+func (c *Client) newOwnedShell(id string) (*Shell, error) {
+	shell := newShell(c, id)
+	c.lifecycleMu.Lock()
+	if c.lifecycleState == clientClosed {
+		c.lifecycleMu.Unlock()
+		cleanupContext, cancel := context.WithTimeout(context.Background(), shellCleanupTimeout)
+		defer cancel()
+		return nil, errors.Join(errors.New("WinRM client closed while creating shell"), shell.CloseWithContext(cleanupContext))
+	}
+	c.activeShells[shell] = struct{}{}
+	c.lifecycleMu.Unlock()
+	return shell, nil
 }
 
 // sendRequest exec the custom http func from the client
@@ -128,44 +173,123 @@ func (c *Client) sendRequestContext(ctx context.Context, request *soap.SoapMessa
 
 // Close releases resources held by transports that require explicit cleanup.
 func (c *Client) Close() error {
+	c.initLifecycle()
+	c.closeOnce.Do(func() {
+		c.closeErr = c.closeResources()
+		close(c.closeDone)
+	})
+	<-c.closeDone
+	return c.closeErr
+}
+
+func (c *Client) closeResources() error {
+	cleanupContext, cancel := context.WithTimeout(context.Background(), commandCleanupTimeout)
+	defer cancel()
 	c.lifecycleMu.Lock()
-	if c.closed {
-		c.lifecycleMu.Unlock()
-		return nil
+	c.lifecycleState = clientClosing
+	operationCancels := make([]context.CancelFunc, 0, len(c.operationCancels))
+	for _, operationCancel := range c.operationCancels {
+		operationCancels = append(operationCancels, operationCancel)
 	}
-	c.closed = true
+	operationsDone := c.operationsDone
+	c.lifecycleMu.Unlock()
+	for _, operationCancel := range operationCancels {
+		operationCancel()
+	}
+
+	var cleanupErr error
+	operationsTimedOut := false
+	if operationsDone != nil {
+		select {
+		case <-operationsDone:
+		case <-cleanupContext.Done():
+			cleanupErr = fmt.Errorf("close client operations: %w", cleanupContext.Err())
+			operationsTimedOut = true
+		}
+	}
+
+	c.lifecycleMu.Lock()
+	if operationsTimedOut {
+		c.lifecycleState = clientClosed
+	}
 	commands := make([]*Command, 0, len(c.activeCommands))
 	for command := range c.activeCommands {
 		commands = append(commands, command)
+	}
+	shells := make([]*Shell, 0, len(c.activeShells))
+	for shell := range c.activeShells {
+		shells = append(shells, shell)
 	}
 	c.lifecycleMu.Unlock()
 
 	for _, command := range commands {
 		command.cancelFn()
 	}
-	cleanupContext, cancel := context.WithTimeout(context.Background(), commandCleanupTimeout)
-	defer cancel()
-	var cleanupErr error
 	for _, command := range commands {
+		waitTimedOut := false
 		select {
 		case <-command.done:
 		case <-cleanupContext.Done():
-			cleanupErr = fmt.Errorf("close client commands: %w", cleanupContext.Err())
+			cleanupErr = errors.Join(cleanupErr, fmt.Errorf("close client commands: %w", cleanupContext.Err()))
+			waitTimedOut = true
 		}
-		if cleanupErr != nil {
+		if waitTimedOut {
 			break
 		}
+		cleanupErr = errors.Join(cleanupErr, command.signalErr)
+	}
+	for _, shell := range shells {
+		cleanupErr = errors.Join(cleanupErr, shell.CloseWithContext(cleanupContext))
 	}
 	if transport, ok := c.http.(closeTransporter); ok {
-		return errors.Join(cleanupErr, transport.Close())
+		cleanupErr = errors.Join(cleanupErr, transport.Close())
 	}
+	c.lifecycleMu.Lock()
+	c.lifecycleState = clientClosed
+	c.lifecycleMu.Unlock()
 	return cleanupErr
 }
 
-func (c *Client) registerCommand(command *Command) error {
+func (c *Client) initLifecycle() {
+	c.lifecycleOnce.Do(func() {
+		c.closeDone = make(chan struct{})
+		c.operationCancels = make(map[uint64]context.CancelFunc)
+		c.activeCommands = make(map[*Command]struct{})
+		c.activeShells = make(map[*Shell]struct{})
+	})
+}
+
+func (c *Client) beginOperation(ctx context.Context) (context.Context, func(), error) {
+	c.initLifecycle()
 	c.lifecycleMu.Lock()
 	defer c.lifecycleMu.Unlock()
-	if c.closed {
+	if c.lifecycleState != clientOpen {
+		return nil, nil, errors.New("WinRM client is closing or closed")
+	}
+	if len(c.operationCancels) == 0 {
+		c.operationsDone = make(chan struct{})
+	}
+	c.nextOperation++
+	operationID := c.nextOperation
+	operationContext, cancel := context.WithCancel(ctx)
+	c.operationCancels[operationID] = cancel
+	return operationContext, func() {
+		cancel()
+		c.lifecycleMu.Lock()
+		delete(c.operationCancels, operationID)
+		if len(c.operationCancels) == 0 {
+			close(c.operationsDone)
+			c.operationsDone = nil
+		}
+		c.lifecycleMu.Unlock()
+	}, nil
+}
+
+func (c *Client) registerCommand(command *Command) error {
+	c.initLifecycle()
+	c.lifecycleMu.Lock()
+	defer c.lifecycleMu.Unlock()
+	if c.lifecycleState == clientClosed {
 		return errors.New("WinRM client is closed")
 	}
 	if c.activeCommands == nil {
@@ -173,6 +297,12 @@ func (c *Client) registerCommand(command *Command) error {
 	}
 	c.activeCommands[command] = struct{}{}
 	return nil
+}
+
+func (c *Client) unregisterShell(shell *Shell) {
+	c.lifecycleMu.Lock()
+	delete(c.activeShells, shell)
+	c.lifecycleMu.Unlock()
 }
 
 func (c *Client) unregisterCommand(command *Command) {
@@ -279,12 +409,14 @@ func (c *Client) RunWithInput(command string, stdout, stderr io.Writer, stdin io
 // performance reasons to buffer it.
 // A stdin reader that can block indefinitely should implement io.Closer so cancellation can interrupt its Read.
 // If stdin is nil, this is equivalent to c.RunWithContext()
-func (c *Client) RunWithContextWithInput(ctx context.Context, command string, stdout, stderr io.Writer, stdin io.Reader) (int, error) {
+func (c *Client) RunWithContextWithInput(ctx context.Context, command string, stdout, stderr io.Writer, stdin io.Reader) (exitCode int, resultErr error) {
 	shell, err := c.CreateShellWithContext(ctx)
 	if err != nil {
 		return 1, err
 	}
-	defer shell.Close()
+	defer func() {
+		resultErr = errors.Join(resultErr, shell.Close())
+	}()
 	cmd, err := shell.executeWithContext(ctx, command, stdin == nil)
 	if err != nil {
 		return 1, err
@@ -327,11 +459,19 @@ func (c *Client) RunWithContextWithInput(ctx context.Context, command string, st
 	go func() {
 		defer outputWG.Done()
 		_, err := io.Copy(stdout, cmd.Stdout)
+		if err != nil {
+			_ = cmd.Stdout.read.CloseWithError(err)
+			cmd.cancelFn()
+		}
 		outputErrors <- err
 	}()
 	go func() {
 		defer outputWG.Done()
 		_, err := io.Copy(stderr, cmd.Stderr)
+		if err != nil {
+			_ = cmd.Stderr.read.CloseWithError(err)
+			cmd.cancelFn()
+		}
 		outputErrors <- err
 	}()
 
@@ -353,7 +493,7 @@ func (c *Client) RunWithContextWithInput(ctx context.Context, command string, st
 	for err := range outputErrors {
 		outputErr = errors.Join(outputErr, err)
 	}
-	_ = cmd.Close()
+	commandCloseErr := cmd.Close()
 
-	return cmd.ExitCode(), errors.Join(cmd.Error(), inputErr, outputErr)
+	return cmd.ExitCode(), errors.Join(cmd.Error(), inputErr, outputErr, commandCloseErr)
 }

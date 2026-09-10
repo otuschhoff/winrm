@@ -41,13 +41,14 @@ type Command struct {
 	Stdout *commandReader
 	Stderr *commandReader
 
-	done      chan struct{}
-	doneOnce  sync.Once
-	startOnce sync.Once
-	stateMu   sync.RWMutex
-	signalMu  sync.Mutex
-	signaled  bool
-	signalErr error
+	done       chan struct{}
+	doneOnce   sync.Once
+	startOnce  sync.Once
+	stateMu    sync.RWMutex
+	signalOnce sync.Once
+	signalGate chan struct{}
+	signaled   bool
+	signalErr  error
 }
 
 func newCommand(ctx context.Context, shell *Shell, ids string) (*Command, error) {
@@ -66,6 +67,7 @@ func newCommandWithOutput(ctx context.Context, shell *Shell, ids string, startOu
 		err:      nil,
 		done:     make(chan struct{}),
 	}
+	command.initSignalGate()
 
 	command.Stdout = newCommandReader("stdout", command)
 	command.Stdin = &commandWriter{
@@ -81,8 +83,28 @@ func newCommandWithOutput(ctx context.Context, shell *Shell, ids string, startOu
 	if startOutput {
 		command.startOutput()
 	}
+	go command.watchCancellation()
 
 	return command, nil
+}
+
+func (c *Command) watchCancellation() {
+	select {
+	case <-c.done:
+		return
+	case <-c.ctx.Done():
+		select {
+		case <-c.done:
+			return
+		default:
+			c.interruptOutput(c.ctx.Err())
+		}
+	}
+}
+
+func (c *Command) interruptOutput(err error) {
+	_ = c.Stdout.read.CloseWithError(err)
+	_ = c.Stderr.read.CloseWithError(err)
 }
 
 func (c *Command) startOutput() {
@@ -122,8 +144,8 @@ func fetchOutput(ctx context.Context, command *Command) {
 func (c *Command) cleanupAfterCancellation(cause error) {
 	cleanupContext, cancel := context.WithTimeout(context.Background(), commandCleanupTimeout)
 	defer cancel()
-	_ = c.signal(cleanupContext)
-	c.finish(cause)
+	signalErr := c.signal(cleanupContext)
+	c.finish(errors.Join(cause, signalErr))
 }
 
 func (c *Command) finish(err error) {
@@ -135,6 +157,7 @@ func (c *Command) finish(err error) {
 		_ = c.Stdout.write.CloseWithError(err)
 		c.client.unregisterCommand(c)
 		close(c.done)
+		c.cancelFn()
 	})
 }
 
@@ -164,12 +187,24 @@ func (c *Command) CloseWithContext(ctx context.Context) error {
 		return err
 	}
 	c.cancelFn()
+	c.interruptOutput(ctx.Err())
 	return c.signal(ctx)
 }
 
 func (c *Command) signal(ctx context.Context) error {
-	c.signalMu.Lock()
-	defer c.signalMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	c.initSignalGate()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-c.signalGate:
+	}
+	defer func() { c.signalGate <- struct{}{} }()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if c.signaled {
 		return c.signalErr
 	}
@@ -178,6 +213,13 @@ func (c *Command) signal(ctx context.Context) error {
 	defer request.Free()
 	_, c.signalErr = c.client.sendRequestContext(ctx, request)
 	return c.signalErr
+}
+
+func (c *Command) initSignalGate() {
+	c.signalOnce.Do(func() {
+		c.signalGate = make(chan struct{}, 1)
+		c.signalGate <- struct{}{}
+	})
 }
 
 func (c *Command) slurpAllOutput() (bool, error) {
@@ -222,10 +264,16 @@ func (c *Command) slurpAllOutput() (bool, error) {
 		return true, err
 	}
 	if stdout.Len() > 0 {
-		_, _ = c.Stdout.write.Write(stdout.Bytes())
+		if _, err := c.Stdout.write.Write(stdout.Bytes()); err != nil {
+			_ = c.Stderr.write.CloseWithError(err)
+			return true, err
+		}
 	}
 	if stderr.Len() > 0 {
-		_, _ = c.Stderr.write.Write(stderr.Bytes())
+		if _, err := c.Stderr.write.Write(stderr.Bytes()); err != nil {
+			_ = c.Stdout.write.CloseWithError(err)
+			return true, err
+		}
 	}
 	if finished {
 		c.stateMu.Lock()

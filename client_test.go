@@ -52,7 +52,7 @@ func (r *Requester) Transport(endpoint *Endpoint) error {
 		Dial:                  r.dial,
 	}
 
-	if endpoint.CACert != nil && len(endpoint.CACert) > 0 {
+	if len(endpoint.CACert) > 0 {
 		certPool, err := readCACerts(endpoint.CACert)
 		if err != nil {
 			return err
@@ -97,7 +97,7 @@ func (s *WinRMSuite) TestClientCreateShellPropagatesContext(c *C) {
 	client := &Client{Parameters: *DefaultParameters, url: "http://host.example.test/wsman", http: requester}
 	_, err := client.CreateShellWithContext(ctx)
 	c.Assert(errors.Is(err, context.Canceled), Equals, true)
-	c.Assert(requester.context, Equals, ctx)
+	c.Assert(errors.Is(requester.context.Err(), context.Canceled), Equals, true)
 }
 
 func (s *WinRMSuite) TestDefaultTransportHonorsCanceledContext(c *C) {
