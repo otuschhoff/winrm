@@ -22,6 +22,11 @@ type kerberosMessageFramer struct {
 	maxPlaintextSize int
 }
 
+type kerberosMessageProtector interface {
+	wrap(message []byte) (header, payload []byte, err error)
+	unwrap(header, payload []byte) ([]byte, error)
+}
+
 func newKerberosMessageFramer(maxPlaintextSize int) (*kerberosMessageFramer, error) {
 	if maxPlaintextSize <= 0 {
 		return nil, errors.New("Kerberos plaintext size limit must be positive")
@@ -33,14 +38,14 @@ func newKerberosMessageFramer(maxPlaintextSize int) (*kerberosMessageFramer, err
 	return &kerberosMessageFramer{maxPlaintextSize: maxPlaintextSize}, nil
 }
 
-func (framer *kerberosMessageFramer) seal(message []byte, adapter *kerberosGSSAdapter) (string, []byte, error) {
-	if adapter == nil {
-		return "", nil, errors.New("Kerberos GSS adapter is required")
+func (framer *kerberosMessageFramer) seal(message []byte, protector kerberosMessageProtector) (string, []byte, error) {
+	if protector == nil {
+		return "", nil, errors.New("Kerberos message protector is required")
 	}
 	if len(message) > framer.maxPlaintextSize {
 		return "", nil, fmt.Errorf("Kerberos plaintext length %d exceeds limit %d", len(message), framer.maxPlaintextSize)
 	}
-	header, payload, err := adapter.wrap(message)
+	header, payload, err := protector.wrap(message)
 	if err != nil {
 		return "", nil, err
 	}
@@ -66,9 +71,9 @@ func (framer *kerberosMessageFramer) seal(message []byte, adapter *kerberosGSSAd
 	return contentType, body.Bytes(), nil
 }
 
-func (framer *kerberosMessageFramer) open(contentType string, body []byte, adapter *kerberosGSSAdapter) ([]byte, error) {
-	if adapter == nil {
-		return nil, errors.New("Kerberos GSS adapter is required")
+func (framer *kerberosMessageFramer) open(contentType string, body []byte, protector kerberosMessageProtector) ([]byte, error) {
+	if protector == nil {
+		return nil, errors.New("Kerberos message protector is required")
 	}
 	mediaType, parameters, err := mime.ParseMediaType(contentType)
 	if err != nil {
@@ -103,7 +108,7 @@ func (framer *kerberosMessageFramer) open(contentType string, body []byte, adapt
 		return nil, errors.New("Kerberos multipart terminal boundary is missing")
 	}
 	encryptedStream := body[payloadStart : len(body)-len(terminalBoundary)]
-	if len(encryptedStream) < 4+kerberosGSSHeaderLength {
+	if len(encryptedStream) < 5 {
 		return nil, errors.New("Kerberos encrypted stream is truncated")
 	}
 
@@ -112,14 +117,14 @@ func (framer *kerberosMessageFramer) open(contentType string, body []byte, adapt
 		return nil, err
 	}
 	headerLength := uint64(binary.LittleEndian.Uint32(encryptedStream[:4]))
-	if headerLength < kerberosGSSHeaderLength || headerLength > kerberosMaxWrapOverhead {
+	if headerLength == 0 || headerLength > kerberosMaxWrapOverhead {
 		return nil, fmt.Errorf("Kerberos security header length %d is invalid", headerLength)
 	}
 	headerEnd := uint64(4) + headerLength
 	if headerEnd > uint64(len(encryptedStream)) {
 		return nil, errors.New("Kerberos encrypted stream is truncated")
 	}
-	message, err := adapter.unwrap(encryptedStream[4:headerEnd], encryptedStream[headerEnd:])
+	message, err := protector.unwrap(encryptedStream[4:headerEnd], encryptedStream[headerEnd:])
 	if err != nil {
 		return nil, err
 	}

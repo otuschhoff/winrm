@@ -4,6 +4,7 @@ go 1.26.0
 
 require (
 	github.com/ChrisTrenkamp/goxpath v0.0.0-20210404020558-97928f7e12b6
+	github.com/alexbrainman/sspi v0.0.0-20250919150558-7d374ff0d59e
 	github.com/gofrs/uuid v4.4.0+incompatible
 	github.com/google/go-cmp v0.6.0 // indirect
 	github.com/kr/pretty v0.1.0 // indirect
