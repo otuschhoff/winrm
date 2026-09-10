@@ -1,6 +1,7 @@
 package winrm
 
 import (
+	"bytes"
 	"errors"
 	"io"
 	"net/http"
@@ -201,5 +202,23 @@ func TestFormatDebugBodySummarizesEncryptedPayload(t *testing.T) {
 	formatted := formatDebugBody(body)
 	if !strings.Contains(formatted, "<encrypted-winrm-payload") || !strings.Contains(formatted, "header-bytes=16") {
 		t.Fatalf("unexpected encrypted payload summary: %q", formatted)
+	}
+}
+
+func BenchmarkFormatDebugBodyUnsafeBinary64KiB(b *testing.B) {
+	payload := bytes.Repeat([]byte{0xff}, 64<<10)
+	b.SetBytes(int64(len(payload)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		_ = formatDebugBodyUnsafe(payload)
+	}
+}
+
+func TestFormatDebugBodyUnsafeAllocationBudget(t *testing.T) {
+	payload := bytes.Repeat([]byte{0xff}, 64<<10)
+	allocations := testing.AllocsPerRun(10, func() { _ = formatDebugBodyUnsafe(payload) })
+	if allocations > 2 {
+		t.Fatalf("unsafe debug allocations = %.1f, budget 2", allocations)
 	}
 }

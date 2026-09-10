@@ -3,6 +3,7 @@ package winrm
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"testing"
@@ -195,4 +196,20 @@ func FuzzParseOutputResponses(f *testing.F) {
 		_, _, _ = ParseSlurpOutputErrResponse(response, io.Discard, io.Discard)
 		_, _, _ = ParseSlurpOutputResponse(response, io.Discard, stream)
 	})
+}
+
+func BenchmarkParseOutputResponse(b *testing.B) {
+	for _, size := range []int{1 << 10, 64 << 10} {
+		b.Run(fmt.Sprintf("decoded-%d", size), func(b *testing.B) {
+			response := kerberosPhase4Receive(bytes.Repeat([]byte("x"), size), nil, true, 0)
+			b.SetBytes(int64(size))
+			b.ReportAllocs()
+			b.ResetTimer()
+			for b.Loop() {
+				if _, _, err := ParseSlurpOutputErrResponse(response, io.Discard, io.Discard); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
 }

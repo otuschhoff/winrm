@@ -22,6 +22,22 @@ const (
 
 var ErrOperationTimeout = errors.New("WS-Management operation timeout")
 
+var (
+	actionXPath           = goxpath.MustParse("//a:Action")
+	faultCodeXPath        = goxpath.MustParse("//s:Fault/s:Code/s:Value")
+	faultSubcodeXPath     = goxpath.MustParse("//s:Fault/s:Code/s:Subcode/s:Value")
+	faultReasonXPath      = goxpath.MustParse("//s:Fault/s:Reason/s:Text")
+	faultWSManCodeXPath   = goxpath.MustParse("//f:WSManFault/@Code")
+	shellIDXPath          = goxpath.MustParse("//rsp:ShellId")
+	commandIDXPath        = goxpath.MustParse("//rsp:CommandId")
+	stdoutXPath           = goxpath.MustParse("//rsp:Stream[@Name='stdout']")
+	stderrXPath           = goxpath.MustParse("//rsp:Stream[@Name='stderr']")
+	outputCommandIDsXPath = goxpath.MustParse("//rsp:Stream/@CommandId | //rsp:CommandState/@CommandId")
+	doneStateXPath        = goxpath.MustParse("//rsp:CommandState[@State='http://schemas.microsoft.com/wbem/wsman/1/windows/shell/CommandState/Done']")
+	exitCodeXPath         = goxpath.MustParse("//rsp:CommandState/rsp:ExitCode")
+	xpathNamespaces       = soap.GetAllXPathNamespaces()
+)
+
 // SOAPFaultError describes a SOAP/WS-Management fault without retaining the
 // complete response, which may contain sensitive endpoint data.
 type SOAPFaultError struct {
@@ -69,27 +85,27 @@ func (b *ExecuteCommandError) Unwrap() error {
 	return b.Inner
 }
 
-func first(node tree.Node, xpath string) (string, error) {
-	nodes, err := xPath(node, xpath)
+func first(node tree.Node, xpath goxpath.XPathExec, name string) (string, error) {
+	nodes, err := executeXPath(node, xpath)
 	if err != nil {
 		return "", err
 	}
 	if len(nodes) < 1 {
-		return "", fmt.Errorf("missing required element %s", xpath)
+		return "", fmt.Errorf("missing required element %s", name)
 	}
 	return nodes[0].ResValue(), nil
 }
 
-func optionalFirst(node tree.Node, xpath string) string {
-	nodes, err := xPath(node, xpath)
+func optionalFirst(node tree.Node, xpath goxpath.XPathExec) string {
+	nodes, err := executeXPath(node, xpath)
 	if err != nil || len(nodes) == 0 {
 		return ""
 	}
 	return strings.TrimSpace(nodes[0].ResValue())
 }
 
-func any(node tree.Node, xpath string) (bool, error) {
-	nodes, err := xPath(node, xpath)
+func any(node tree.Node, xpath goxpath.XPathExec) (bool, error) {
+	nodes, err := executeXPath(node, xpath)
 	if err != nil {
 		return false, err
 	}
@@ -100,12 +116,11 @@ func any(node tree.Node, xpath string) (bool, error) {
 }
 
 func xPath(node tree.Node, xpath string) (tree.NodeSet, error) {
-	xpExec := goxpath.MustParse(xpath)
-	nodes, err := xpExec.ExecNode(node, soap.GetAllXPathNamespaces())
-	if err != nil {
-		return nil, err
-	}
-	return nodes, nil
+	return executeXPath(node, goxpath.MustParse(xpath))
+}
+
+func executeXPath(node tree.Node, xpath goxpath.XPathExec) (tree.NodeSet, error) {
+	return xpath.ExecNode(node, xpathNamespaces)
 }
 
 func newExecuteCommandError(response string, format string, args ...interface{}) *ExecuteCommandError {
@@ -114,10 +129,10 @@ func newExecuteCommandError(response string, format string, args ...interface{})
 
 func parseSOAPFault(doc tree.Node) *SOAPFaultError {
 	return &SOAPFaultError{
-		Code:      optionalFirst(doc, "//s:Fault/s:Code/s:Value"),
-		Subcode:   optionalFirst(doc, "//s:Fault/s:Code/s:Subcode/s:Value"),
-		Reason:    optionalFirst(doc, "//s:Fault/s:Reason/s:Text"),
-		WSManCode: optionalFirst(doc, "//f:WSManFault/@Code"),
+		Code:      optionalFirst(doc, faultCodeXPath),
+		Subcode:   optionalFirst(doc, faultSubcodeXPath),
+		Reason:    optionalFirst(doc, faultReasonXPath),
+		WSManCode: optionalFirst(doc, faultWSManCodeXPath),
 	}
 }
 
@@ -137,14 +152,14 @@ func parseSOAPFaultResponse(response string) (*SOAPFaultError, error) {
 }
 
 func responseAction(doc tree.Node) (string, error) {
-	action, err := first(doc, "//a:Action")
+	action, err := first(doc, actionXPath, "//a:Action")
 	if err != nil {
 		return "", err
 	}
 	return strings.TrimSpace(action), nil
 }
 
-func parseResponse(response, expectedAction, idXPath string) (string, error) {
+func parseResponse(response, expectedAction string, idXPath goxpath.XPathExec, idName string) (string, error) {
 	doc, err := xmltree.ParseXML(strings.NewReader(response))
 	if err != nil {
 		return "", newExecuteCommandError(response, "parsing xml response: %w", err)
@@ -159,13 +174,13 @@ func parseResponse(response, expectedAction, idXPath string) (string, error) {
 		return "", &ExecuteCommandError{Inner: parseSOAPFault(doc), Body: response}
 	}
 	if action == expectedAction {
-		id, err := first(doc, idXPath)
+		id, err := first(doc, idXPath, idName)
 		if err != nil {
-			return "", newExecuteCommandError(response, "finding %v: %w", idXPath, err)
+			return "", newExecuteCommandError(response, "finding %v: %w", idName, err)
 		}
 		id = strings.TrimSpace(id)
 		if id == "" {
-			return "", newExecuteCommandError(response, "missing required %s", strings.TrimPrefix(idXPath, "//rsp:"))
+			return "", newExecuteCommandError(response, "missing required %s", strings.TrimPrefix(idName, "//rsp:"))
 		}
 		return id, nil
 	}
@@ -176,6 +191,7 @@ func ParseOpenShellResponse(response string) (string, error) {
 	return parseResponse(
 		response,
 		"http://schemas.xmlsoap.org/ws/2004/09/transfer/CreateResponse",
+		shellIDXPath,
 		"//rsp:ShellId",
 	)
 }
@@ -184,6 +200,7 @@ func ParseExecuteCommandResponse(response string) (string, error) {
 	return parseResponse(
 		response,
 		"http://schemas.microsoft.com/wbem/wsman/1/windows/shell/CommandResponse",
+		commandIDXPath,
 		"//rsp:CommandId",
 	)
 }
@@ -202,7 +219,7 @@ func parseSlurpOutputErrResponse(response string, stdout, stderr io.Writer, expe
 		return false, 0, err
 	}
 
-	stdouts, err := xPath(doc, "//rsp:Stream[@Name='stdout']")
+	stdouts, err := executeXPath(doc, stdoutXPath)
 	if err != nil {
 		return false, 0, err
 	}
@@ -211,7 +228,7 @@ func parseSlurpOutputErrResponse(response string, stdout, stderr io.Writer, expe
 			return false, 0, err
 		}
 	}
-	stderrs, err := xPath(doc, "//rsp:Stream[@Name='stderr']")
+	stderrs, err := executeXPath(doc, stderrXPath)
 	if err != nil {
 		return false, 0, err
 	}
@@ -234,16 +251,16 @@ func ParseSlurpOutputResponse(response string, stream io.Writer, streamType stri
 		return false, 0, err
 	}
 
-	streamXPath := ""
+	var streamXPath goxpath.XPathExec
 	switch streamType {
 	case "stdout":
-		streamXPath = "//rsp:Stream[@Name='stdout']"
+		streamXPath = stdoutXPath
 	case "stderr":
-		streamXPath = "//rsp:Stream[@Name='stderr']"
+		streamXPath = stderrXPath
 	default:
 		return false, 0, fmt.Errorf("unsupported stream %q", streamType)
 	}
-	nodes, err := xPath(doc, streamXPath)
+	nodes, err := executeXPath(doc, streamXPath)
 	if err != nil {
 		return false, 0, err
 	}
@@ -269,7 +286,7 @@ func validateOutputEnvelope(doc tree.Node, expectedCommandID string) error {
 	if expectedCommandID == "" {
 		return nil
 	}
-	nodes, err := xPath(doc, "//rsp:Stream/@CommandId | //rsp:CommandState/@CommandId")
+	nodes, err := executeXPath(doc, outputCommandIDsXPath)
 	if err != nil {
 		return err
 	}
@@ -285,14 +302,14 @@ func validateOutputEnvelope(doc tree.Node, expectedCommandID string) error {
 }
 
 func outputCompletion(doc tree.Node) (bool, int, error) {
-	ended, err := any(doc, "//rsp:CommandState[@State='http://schemas.microsoft.com/wbem/wsman/1/windows/shell/CommandState/Done']")
+	ended, err := any(doc, doneStateXPath)
 	if err != nil {
 		return false, 0, err
 	}
 	if !ended {
 		return false, 0, nil
 	}
-	exit, err := first(doc, "//rsp:CommandState/rsp:ExitCode")
+	exit, err := first(doc, exitCodeXPath, "//rsp:CommandState/rsp:ExitCode")
 	if err != nil {
 		return false, 0, fmt.Errorf("missing required ExitCode: %w", err)
 	}
