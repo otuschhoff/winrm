@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"sync/atomic"
 )
@@ -113,7 +112,8 @@ func formatDebugBodyUnsafe(body []byte) string {
 	}
 
 	var formatted strings.Builder
-	formatted.Grow(len(body))
+	formatted.Grow(len(body) * 4)
+	const hexDigits = "0123456789ABCDEF"
 	for _, char := range body {
 		switch char {
 		case '\n':
@@ -127,11 +127,8 @@ func formatDebugBodyUnsafe(body []byte) string {
 				formatted.WriteByte(char)
 			} else {
 				formatted.WriteString(`\x`)
-				hex := strings.ToUpper(strconv.FormatUint(uint64(char), 16))
-				if len(hex) < 2 {
-					formatted.WriteByte('0')
-				}
-				formatted.WriteString(hex)
+				formatted.WriteByte(hexDigits[char>>4])
+				formatted.WriteByte(hexDigits[char&0x0f])
 			}
 		}
 	}

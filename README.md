@@ -234,8 +234,8 @@ The environment diagnostics use these controls:
 | Variable | Behavior |
 | --- | --- |
 | `OPSCTL_DEBUG_WINRM_SOAP` | Log redacted SOAP payload metadata to stderr. |
-| `OPSCTL_DEBUG_WINRM_CAPTURE` | Write redacted JSONL capture records to stderr. |
-| `OPSCTL_DEBUG_WINRM_CAPTURE_FILE` | Append redacted JSONL records to this file. New and existing files are forced to mode `0600` where Unix permission bits are supported. |
+| `OPSCTL_DEBUG_WINRM_CAPTURE` | Queue redacted JSONL capture records for stderr. |
+| `OPSCTL_DEBUG_WINRM_CAPTURE_FILE` | Queue redacted JSONL records for this file. New, existing, and rotated files are forced to mode `0600` where Unix permission bits are supported. |
 | `OPSCTL_DEBUG_WINRM_UNSAFE=1` | Include raw headers and payloads in all enabled diagnostics. `true` is also accepted. |
 
 Safe JSONL records retain byte counts, protocol metadata, and parsed GSS header
@@ -243,6 +243,21 @@ details, but omit `body_base64` and `body_text`. Unsafe output can contain
 password-derived authorization values, Kerberos tokens, commands, stdin,
 stdout, and stderr. Restrict access, retention, and transfer of these files; do
 not attach unsafe captures to public issues or CI artifacts.
+
+Capture delivery is asynchronous through a 64-record queue so a slow diagnostic
+sink does not block an authenticated exchange. A full queue drops new records;
+`WinRMCaptureDroppedRecords` reports the cumulative process-wide count.
+`FlushWinRMCapture` waits, subject to its context, for records accepted before
+the call to reach their sinks. Call it before process exit when complete capture
+delivery matters. A successful flush does not retry records that were dropped or
+report earlier sink write errors; file errors are written to stderr.
+
+Each record captures at most 64 KiB of payload, 64 header fields and 8 KiB of
+header data, 8 KiB per metadata field, and 256 KiB of encoded JSON. Truncation
+is identified in the record. Capture files rotate before exceeding 16 MiB when
+possible; the previous generation is retained as `<path>.1` and any older
+generation is replaced. One record may make a file slightly larger than the
+rotation threshold.
 
 ### Kerberos integration comparison
 

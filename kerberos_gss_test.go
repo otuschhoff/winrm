@@ -297,7 +297,7 @@ func newSyntheticKerberosSPNEGOExchange(t *testing.T) (*spnego.SPNEGO, *spnego.S
 	return initiator, acceptor, initial
 }
 
-func newTestKerberosGSSPair(t *testing.T, keyType int32, key []byte, acceptorSubkey bool) (*kerberosGSSAdapter, *kerberosGSSAdapter) {
+func newTestKerberosGSSPair(t testing.TB, keyType int32, key []byte, acceptorSubkey bool) (*kerberosGSSAdapter, *kerberosGSSAdapter) {
 	t.Helper()
 	encryptionKey := types.EncryptionKey{KeyType: keyType, KeyValue: key}
 	initiatorContext, err := gssapi.NewSecurityContext(encryptionKey, true, 0, 0, acceptorSubkey)
@@ -317,4 +317,25 @@ func newTestKerberosGSSPair(t *testing.T, keyType int32, key []byte, acceptorSub
 		t.Fatal(err)
 	}
 	return initiator, acceptor
+}
+
+func BenchmarkKerberosGSSWrapUnwrap64KiB(b *testing.B) {
+	initiator, acceptor := newTestKerberosGSSPair(b, 18, []byte("0123456789abcdef0123456789abcdef"), true)
+	payload := bytes.Repeat([]byte("x"), 64<<10)
+	b.SetBytes(int64(len(payload)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		header, sealed, err := initiator.wrap(payload)
+		if err != nil {
+			b.Fatal(err)
+		}
+		opened, err := acceptor.unwrap(header, sealed)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(opened) != len(payload) {
+			b.Fatalf("opened bytes = %d, want %d", len(opened), len(payload))
+		}
+	}
 }

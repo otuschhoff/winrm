@@ -246,3 +246,28 @@ func FuzzKerberosMessageFramerOpen(f *testing.F) {
 		_, _ = framer.open(fuzzContentType, fuzzBody, fuzzAdapter)
 	})
 }
+
+func BenchmarkKerberosGSSFramer64KiB(b *testing.B) {
+	initiator, acceptor := newTestKerberosGSSPair(b, 18, []byte("0123456789abcdef0123456789abcdef"), true)
+	payload := bytes.Repeat([]byte("x"), 64<<10)
+	framer, err := newKerberosMessageFramer(len(payload))
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.SetBytes(int64(len(payload)))
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		contentType, sealed, err := framer.seal(payload, initiator)
+		if err != nil {
+			b.Fatal(err)
+		}
+		opened, err := framer.open(contentType, sealed, acceptor)
+		if err != nil {
+			b.Fatal(err)
+		}
+		if len(opened) != len(payload) {
+			b.Fatalf("opened bytes = %d, want %d", len(opened), len(payload))
+		}
+	}
+}

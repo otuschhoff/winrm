@@ -288,13 +288,15 @@ These phases are separate from historical feature phases in other documents. Pha
 
 **Dependencies:** B-E correctness before performance refactoring. **Finding:** R13 and resource-model risks.
 
+**Status:** complete on 2026-09-10 for the local pure-Go measurement and implementation scope. Evidence, budgets, and the explicit live-capacity limitation are recorded in [Phase F measured CPU, RAM, and capacity work](phase-f-implementation.md).
+
 | Task | Owning slice | Implementation and acceptance |
 | --- | --- | --- |
 | F1 | Benchmarks beside [response_test.go](../response_test.go), [debug_http_test.go](../debug_http_test.go) | Retain recipes below; add actual GSS/framing and capture workloads. Collect CPU/heap profiles and RSS/live heap separately from allocations; record runtime, CPU, concurrency, payload and debug modes. |
 | F2 | [debug_http.go](../debug_http.go), [debug_capture.go](../debug_capture.go) | Remove per-byte allocations; cap events/payload, define bounded sink buffering/rotation/error semantics. Saturated diagnostics cannot hold an authenticated session indefinitely. Preserve explicit unsafe capabilities under chosen policy. |
 | F3 | [response.go](../response.go), admission only if justified | Benchmark immutable selectors/fewer copies before parser replacement. Sweep 1/8/32 commands and short/long output, debug off/on; record p50/p95 latency, allocations, heap/RSS, goroutines/connections. Define budgets. Add independent-session pooling only when measurements justify affinity/API complexity. |
 
-**Gate:** same-machine before/after benchmarks (at least five samples), unchanged semantic fixtures, clean race suite, agreed budgets. Proposed first optimization target: at least 90% fewer synthetic binary-debug allocations without losing escaping semantics. This is a future target, not an observed improvement; do not invent throughput/RSS limits.
+**Gate:** same-machine before/after benchmarks (at least five samples), unchanged semantic fixtures, clean race suite, agreed budgets. The formatter allocation target was met and is enforced by a regression budget. Local capacity and RSS figures are characterization data, not live Windows/KDC limits.
 
 ### Phase G: Maintainability, CI, and Release Evidence
 
