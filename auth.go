@@ -1,11 +1,12 @@
 package winrm
 
 import (
+	"context"
 	"crypto/tls"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 type ClientAuthRequest struct {
 	transport http.RoundTripper
 	dial      func(network, addr string) (net.Conn, error)
+	timeout   time.Duration
 }
 
 // Transport Transport
@@ -25,13 +27,9 @@ func (c *ClientAuthRequest) Transport(endpoint *Endpoint) error {
 		return err
 	}
 
-	dial := (&net.Dialer{
+	dialer := &net.Dialer{
 		Timeout:   30 * time.Second,
 		KeepAlive: 30 * time.Second,
-	}).Dial
-
-	if c.dial != nil {
-		dial = c.dial
 	}
 
 	//nolint:gosec
@@ -42,11 +40,15 @@ func (c *ClientAuthRequest) Transport(endpoint *Endpoint) error {
 			InsecureSkipVerify: endpoint.Insecure,
 			Certificates:       []tls.Certificate{cert},
 		},
-		Dial:                  dial,
+		DialContext:           dialer.DialContext,
 		ResponseHeaderTimeout: endpoint.Timeout,
 	}
+	if c.dial != nil {
+		transport.DialContext = nil
+		transport.Dial = c.dial
+	}
 
-	if endpoint.CACert != nil && len(endpoint.CACert) > 0 {
+	if len(endpoint.CACert) > 0 {
 		certPool, err := readCACerts(endpoint.CACert)
 		if err != nil {
 			return err
@@ -56,37 +58,21 @@ func (c *ClientAuthRequest) Transport(endpoint *Endpoint) error {
 	}
 
 	c.transport = transport
+	c.timeout = endpoint.Timeout
 
 	return nil
 }
 
-// parse func reads the response body and return it as a string
-func parse(response *http.Response) (string, error) {
-	// if we received the content we expected
-	if strings.Contains(response.Header.Get("Content-Type"), "application/soap+xml") {
-		body, err := io.ReadAll(response.Body)
-		defer func() {
-			// defer can modify the returned value before
-			// it is actually passed to the calling statement
-			if errClose := response.Body.Close(); errClose != nil && err == nil {
-				err = errClose
-			}
-		}()
-		if err != nil {
-			return "", fmt.Errorf("error while reading request body %w", err)
-		}
-
-		return string(body), nil
-	}
-
-	return "", fmt.Errorf("invalid content type")
-}
-
 // Post Post
 func (c ClientAuthRequest) Post(client *Client, request *soap.SoapMessage) (string, error) {
-	httpClient := &http.Client{Transport: c.transport}
+	return c.PostContext(context.Background(), client, request)
+}
 
-	req, err := http.NewRequest("POST", client.url, strings.NewReader(request.String()))
+// PostContext makes a certificate-authenticated POST request with caller cancellation.
+func (c ClientAuthRequest) PostContext(ctx context.Context, client *Client, request *soap.SoapMessage) (string, error) {
+	httpClient := &http.Client{Transport: c.transport, Timeout: c.timeout}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, client.url, strings.NewReader(request.String()))
 	if err != nil {
 		return "", fmt.Errorf("impossible to create http request %w", err)
 	}
@@ -95,24 +81,27 @@ func (c ClientAuthRequest) Post(client *Client, request *soap.SoapMessage) (stri
 	req.Header.Set("Authorization", "http://schemas.dmtf.org/wbem/wsman/1/wsman/secprofile/https/mutual")
 
 	resp, err := httpClient.Do(req)
+	debugHTTPRoundTrip(req, resp, err)
 	if err != nil {
+		if os.IsTimeout(err) {
+			return "", fmt.Errorf("HTTP request timeout: %w", err)
+		}
 		return "", fmt.Errorf("unknown error %w", err)
 	}
 
-	body, err := parse(resp)
+	body, err := readSOAPResponse(resp, client.EnvelopeSize)
 	if err != nil {
-		return "", fmt.Errorf("http response error: %d - %w", resp.StatusCode, err)
+		return "", fmt.Errorf("HTTP response error: %w", err)
 	}
+	return body, nil
+}
 
-	// if we have different 200 http status code
-	// we must replace the error
-	defer func() {
-		if resp.StatusCode != 200 {
-			body, err = "", fmt.Errorf("http error %d: %s", resp.StatusCode, body)
-		}
-	}()
-
-	return body, err
+// Close releases idle connections owned by the certificate transport.
+func (c *ClientAuthRequest) Close() error {
+	if closer, ok := c.transport.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
+	return nil
 }
 
 // NewClientAuthRequestWithDial NewClientAuthRequestWithDial

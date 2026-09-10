@@ -122,7 +122,11 @@ func TestHTTPDebugOutputRedactsSensitiveDataByDefault(t *testing.T) {
 		},
 		Body: io.NopCloser(strings.NewReader("<secret>synthetic-secret</secret>")),
 	}
-	output := captureDebugStderr(t, func() { debugHTTPRoundTrip(request, response, nil) })
+	output := captureDebugStderr(t, func() {
+		debugHTTPRoundTrip(request, response, nil)
+		body, bodyErr := readBoundedResponseBody(response.Body, 64)
+		debugHTTPResponseBody(body, bodyErr)
+	})
 	if strings.Contains(output, "synthetic-secret") || strings.Contains(output, "password") {
 		t.Fatalf("safe HTTP debug contains sensitive data: %s", output)
 	}

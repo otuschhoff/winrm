@@ -234,6 +234,8 @@ These phases are separate from historical feature phases in other documents. Pha
 
 **Dependencies:** A2 for diagnostics policy; A3 before encrypted behavior expansion. **Findings:** R3, R7, HTTP portion of R8.
 
+**Status:** complete on 2026-09-10. Implementation and final gate evidence are recorded in [Phase B HTTP ownership and error semantics](phase-b-implementation.md).
+
 | Task | Owning slice | Implementation and acceptance |
 | --- | --- | --- |
 | B1 | [http.go](../http.go), [auth.go](../auth.go), adjacent tests | Remove deferred return mutation; explicit status/MIME checks, bounded reads, exactly-once close. Factor a small helper only for demonstrated duplication. Test 200/401/500, SOAP/non-SOAP, disguised MIME, oversize, partial reads and close errors. |

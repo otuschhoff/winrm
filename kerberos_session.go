@@ -195,6 +195,7 @@ func (session *kerberosSession) postEncryptedLocked(ctx context.Context, message
 	}
 	responseLimit := maxPlaintextSize + kerberosMaxWrapOverhead + kerberosMaxMetadataSize
 	encryptedBody, readErr := readBoundedBody(response.Body, responseLimit)
+	debugHTTPResponseBody(encryptedBody, readErr)
 	emitWinRMCaptureRecord(exchangeID, "response", "encrypted", "final_packet", encryptedBody, request, response.StatusCode, response.Header.Get("Content-Type"), response.Header)
 	connection, changed := tracker.result()
 	if connection == nil || changed {
@@ -251,6 +252,7 @@ func (session *kerberosSession) establishLocked(ctx context.Context) error {
 			return &KerberosError{Stage: "negotiate", Err: err}
 		}
 		bootstrapBody, bodyErr := readBoundedBody(response.Body, kerberosMaxBootstrapBody)
+		debugHTTPResponseBody(bootstrapBody, bodyErr)
 		emitWinRMCaptureRecord(exchangeID, "response", "bootstrap", "final_packet", bootstrapBody, request, response.StatusCode, response.Header.Get("Content-Type"), response.Header)
 		emitWinRMCaptureRecord(exchangeID, "response", "bootstrap", "unencrypted_payload", bootstrapBody, request, response.StatusCode, response.Header.Get("Content-Type"), response.Header)
 		if bodyErr != nil {
@@ -310,6 +312,7 @@ func (session *kerberosSession) postPlaintextLocked(ctx context.Context, message
 		return "", &KerberosError{Stage: "http", Err: err}
 	}
 	body, readErr := readBoundedBody(response.Body, maxBodySize)
+	debugHTTPResponseBody(body, readErr)
 	debugSOAPPayload("response", "plaintext", body)
 	emitWinRMCaptureRecord(exchangeID, "response", "plaintext", "final_packet", body, request, response.StatusCode, response.Header.Get("Content-Type"), response.Header)
 	emitWinRMCaptureRecord(exchangeID, "response", "plaintext", "unencrypted_payload", body, request, response.StatusCode, response.Header.Get("Content-Type"), response.Header)
@@ -459,11 +462,12 @@ func discardBoundedBody(body io.ReadCloser, limit int) error {
 	return err
 }
 
-func readBoundedBody(body io.ReadCloser, limit int) ([]byte, error) {
+func readBoundedBody(body io.ReadCloser, limit int) (result []byte, err error) {
 	if body == nil {
 		return nil, nil
 	}
-	defer body.Close()
-	reader := &kerberosBoundedReadCloser{reader: body, closer: body, remaining: limit}
-	return io.ReadAll(reader)
+	defer func() {
+		err = errors.Join(err, body.Close())
+	}()
+	return readBoundedResponseBody(body, limit)
 }

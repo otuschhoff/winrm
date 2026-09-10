@@ -197,7 +197,8 @@ func (c *Command) slurpAllOutput() (bool, error) {
 			// Operation timeout because the server didn't respond in time
 			return false, err
 		}
-		if strings.Contains(err.Error(), "OperationTimeout") {
+		var responseError *httpResponseError
+		if errors.As(err, &responseError) && strings.Contains(responseError.body, "OperationTimeout") || strings.Contains(err.Error(), "OperationTimeout") {
 			// Operation timeout because there was no command output
 			return false, err
 		}
