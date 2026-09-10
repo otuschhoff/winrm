@@ -43,6 +43,12 @@ type kerberosNegotiator interface {
 	Context() gssapi.Context
 }
 
+type kerberosSSPIAuthenticator interface {
+	establish(context.Context, *http.Client, string, string) (kerberosMessageProtector, net.Conn, error)
+	reset() error
+	close() error
+}
+
 type kerberosSession struct {
 	gate              chan struct{}
 	gateOnce          sync.Once
@@ -51,9 +57,10 @@ type kerberosSession struct {
 	spn               string
 	requireEncryption bool
 	kerberosClient    *client.Client
+	sspi              kerberosSSPIAuthenticator
 	httpClient        *http.Client
 	newNegotiator     func(*http.Client) kerberosNegotiator
-	adapter           *kerberosGSSAdapter
+	protector         kerberosMessageProtector
 	connection        net.Conn
 }
 
@@ -62,7 +69,13 @@ func newKerberosSession(owner *ClientKerberos, endpoint *Endpoint) (*kerberosSes
 	if err != nil {
 		return nil, &KerberosError{Stage: "config", Err: err}
 	}
-	kerberosClient, err := newKerberosCredentialClient(owner)
+	var kerberosClient *client.Client
+	var sspiAuthenticator kerberosSSPIAuthenticator
+	if owner.UseSSPI {
+		sspiAuthenticator, err = newKerberosSSPIAuthenticator()
+	} else {
+		kerberosClient, err = newKerberosCredentialClient(owner)
+	}
 	if err != nil {
 		return nil, &KerberosError{Stage: "credentials", Err: err}
 	}
@@ -79,12 +92,14 @@ func newKerberosSession(owner *ClientKerberos, endpoint *Endpoint) (*kerberosSes
 	}
 	session := &kerberosSession{
 		state: kerberosSessionCredentialsReady, endpoint: endpointURL, spn: spn,
-		requireEncryption: requireEncryption, kerberosClient: kerberosClient, httpClient: httpClient,
+		requireEncryption: requireEncryption, kerberosClient: kerberosClient, sspi: sspiAuthenticator, httpClient: httpClient,
 	}
-	session.newNegotiator = func(httpClient *http.Client) kerberosNegotiator {
-		return spnego.NewClientWithOptions(kerberosClient, httpClient, spn, spnego.KRB5TokenAPREQOptions{
-			GSSAPIFlags: []int{gssapi.ContextFlagMutual, gssapi.ContextFlagSequence, gssapi.ContextFlagInteg, gssapi.ContextFlagConf},
-		})
+	if kerberosClient != nil {
+		session.newNegotiator = func(httpClient *http.Client) kerberosNegotiator {
+			return spnego.NewClientWithOptions(kerberosClient, httpClient, spn, spnego.KRB5TokenAPREQOptions{
+				GSSAPIFlags: []int{gssapi.ContextFlagMutual, gssapi.ContextFlagSequence, gssapi.ContextFlagInteg, gssapi.ContextFlagConf},
+			})
+		}
 	}
 	return session, nil
 }
@@ -127,6 +142,16 @@ func newKerberosCredentialClient(owner *ClientKerberos) (*client.Client, error) 
 		return nil, fmt.Errorf("load Kerberos configuration: %w", err)
 	}
 	enforceAESOnlyKerberosConfig(cfg)
+	if owner.KrbCCacheData != nil {
+		if err := validateAESOnlyCCache(owner.KrbCCacheData); err != nil {
+			return nil, fmt.Errorf("validate in-memory ccache: %w", err)
+		}
+		kerberosClient, err := client.NewFromCCache(owner.KrbCCacheData, cfg, client.DisablePAFXFAST(true))
+		if err != nil {
+			return nil, fmt.Errorf("create Kerberos client from in-memory ccache: %w", err)
+		}
+		return kerberosClient, nil
+	}
 	if owner.KrbCCache != "" {
 		encoded, err := os.ReadFile(owner.KrbCCache)
 		if err != nil {
@@ -263,7 +288,7 @@ func (session *kerberosSession) postEncryptedLocked(ctx context.Context, message
 	if err != nil {
 		return "", &KerberosError{Stage: "config", Err: err}
 	}
-	contentType, body, err := framer.seal([]byte(message), session.adapter)
+	contentType, body, err := framer.seal([]byte(message), session.protector)
 	if err != nil {
 		session.invalidateLocked()
 		return "", &KerberosError{Stage: "wrap", Err: err}
@@ -297,7 +322,7 @@ func (session *kerberosSession) postEncryptedLocked(ctx context.Context, message
 		session.invalidateLocked()
 		return "", &KerberosError{Stage: "http", StatusCode: response.StatusCode, Err: readErr}
 	}
-	plaintext, err := framer.open(response.Header.Get("Content-Type"), encryptedBody, session.adapter)
+	plaintext, err := framer.open(response.Header.Get("Content-Type"), encryptedBody, session.protector)
 	if err != nil {
 		session.invalidateLocked()
 		return "", &KerberosError{Stage: "unwrap", StatusCode: response.StatusCode, Err: err}
@@ -322,6 +347,23 @@ func (session *kerberosSession) establishLocked(ctx context.Context) error {
 		session.state = kerberosSessionCredentialsReady
 	}
 	session.state = kerberosSessionNegotiating
+	if session.sspi != nil {
+		protector, connection, err := session.sspi.establish(ctx, session.httpClient, session.endpoint, session.spn)
+		if err != nil {
+			resetErr := session.sspi.reset()
+			session.state = kerberosSessionInvalid
+			return &KerberosError{Stage: "negotiate", Err: errors.Join(err, resetErr)}
+		}
+		if protector == nil || connection == nil {
+			resetErr := session.sspi.reset()
+			session.state = kerberosSessionInvalid
+			return &KerberosError{Stage: "negotiate", Err: errors.Join(errors.New("SSPI Kerberos authentication returned an incomplete context"), resetErr)}
+		}
+		session.protector = protector
+		session.connection = connection
+		session.state = kerberosSessionEstablished
+		return nil
+	}
 	counting := &kerberosCountingRoundTripper{base: session.httpClient.Transport, remaining: kerberosMaxBootstrapExchanges}
 	clientCopy := *session.httpClient
 	clientCopy.Transport = counting
@@ -379,7 +421,7 @@ func (session *kerberosSession) establishLocked(ctx context.Context) error {
 			session.state = kerberosSessionInvalid
 			return &KerberosError{Stage: "negotiate", Err: err}
 		}
-		session.adapter = adapter
+		session.protector = adapter
 		session.connection = connection
 		session.state = kerberosSessionEstablished
 		return nil
@@ -439,9 +481,12 @@ func (session *kerberosSession) postPlaintextLocked(ctx context.Context, message
 }
 
 func (session *kerberosSession) invalidateLocked() {
-	session.adapter = nil
+	session.protector = nil
 	session.connection = nil
 	session.state = kerberosSessionInvalid
+	if session.sspi != nil {
+		_ = session.sspi.reset()
+	}
 }
 
 func (session *kerberosSession) close() error {
@@ -458,16 +503,20 @@ func (session *kerberosSession) closeWithContext(ctx context.Context) error {
 	if session.state == kerberosSessionClosed {
 		return nil
 	}
-	session.adapter = nil
+	session.protector = nil
 	session.connection = nil
 	session.state = kerberosSessionClosed
 	if session.kerberosClient != nil {
 		session.kerberosClient.Destroy()
 	}
+	var closeErr error
+	if session.sspi != nil {
+		closeErr = session.sspi.close()
+	}
 	if closer, ok := session.httpClient.Transport.(interface{ CloseIdleConnections() }); ok {
 		closer.CloseIdleConnections()
 	}
-	return nil
+	return closeErr
 }
 
 type kerberosCountingRoundTripper struct {

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/url"
 
+	"github.com/otuschhoff/gokrb5/v8/credentials"
 	"github.com/otuschhoff/winrm/soap"
 )
 
@@ -22,15 +23,19 @@ const (
 
 // Settings holds all the information necessary to configure the provider
 type Settings struct {
-	WinRMUsername        string
-	WinRMPassword        string
-	WinRMHost            string
-	WinRMPort            int
-	WinRMProto           string
-	WinRMInsecure        bool
-	KrbRealm             string
-	KrbConfig            string
-	KrbSpn               string
+	WinRMUsername string
+	WinRMPassword string
+	WinRMHost     string
+	WinRMPort     int
+	WinRMProto    string
+	WinRMInsecure bool
+	KrbRealm      string
+	KrbConfig     string
+	KrbSpn        string
+	// KrbUseSSPI uses the current Windows user's Kerberos credentials instead of gokrb5 credentials.
+	KrbUseSSPI bool
+	// KrbCCacheData is a borrowed in-memory ccache that must not be modified while the client is in use.
+	KrbCCacheData        *credentials.CCache
 	KrbCCache            string
 	KrbKeytab            string
 	KrbMessageEncryption string
@@ -39,14 +44,18 @@ type Settings struct {
 
 type ClientKerberos struct {
 	clientRequest
-	Username          string
-	Password          string
-	Realm             string
-	Hostname          string
-	Port              int
-	Proto             string
-	SPN               string
-	KrbConf           string
+	Username string
+	Password string
+	Realm    string
+	Hostname string
+	Port     int
+	Proto    string
+	SPN      string
+	// UseSSPI uses the current Windows user's Kerberos credentials instead of gokrb5 credentials.
+	UseSSPI bool
+	KrbConf string
+	// KrbCCacheData is a borrowed in-memory ccache that must not be modified while the client is in use.
+	KrbCCacheData     *credentials.CCache
 	KrbCCache         string
 	KrbKeytab         string
 	MessageEncryption string
@@ -61,7 +70,9 @@ func NewClientKerberos(settings *Settings) *ClientKerberos {
 		Hostname:          settings.WinRMHost,
 		Port:              settings.WinRMPort,
 		Proto:             settings.WinRMProto,
+		UseSSPI:           settings.KrbUseSSPI,
 		KrbConf:           settings.KrbConfig,
+		KrbCCacheData:     settings.KrbCCacheData,
 		KrbCCache:         settings.KrbCCache,
 		KrbKeytab:         settings.KrbKeytab,
 		SPN:               settings.KrbSpn,

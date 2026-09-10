@@ -196,8 +196,12 @@ The initialized `Endpoint` controls the request URL and TLS settings. A custom
 CA verifies private HTTPS certificates; `Insecure` explicitly disables
 certificate verification. Legacy Kerberos host, port, or protocol fields that
 conflict with the endpoint are rejected. The default SPN is
-`HTTP/<endpoint-host>`. Credential source precedence is ccache, keytab, then
-password, with no fallback after authentication failure.
+`HTTP/<endpoint-host>`. Set `KrbCCacheData` to use an existing gokrb5 ccache
+without writing it to disk. The cache is borrowed and must not be modified
+while the client is in use. Credential precedence is in-memory ccache, file
+ccache, keytab, then password, with no fallback after authentication failure. On Windows, set
+`KrbUseSSPI` to use the current user's Kerberos credentials through SSPI; this
+mode takes precedence over all gokrb5 credential fields.
 
 Call `Client.Close` when the client is no longer needed so active commands are
 cancelled and Kerberos credentials and idle connections are released. Command
@@ -212,13 +216,15 @@ bytes of multipart metadata; SPNEGO bootstrap is limited to five HTTP
 exchanges. Responses are bounded by the envelope size and caller/endpoint
 deadlines.
 
-The native transport supports password, keytab, and ccache credentials with
-mutual SPNEGO authentication and AES RFC 4121 message protection. Kerberos
-ticket requests and permitted enctypes are restricted to AES128 and AES256
-(enctypes 17-20); non-AES ccache session keys are rejected and non-AES keytab
-entries are ignored. It does not provide credential delegation, channel binding,
-or automatic authentication-mode fallback. Python and system Kerberos tools are
-used only by opt-in comparison tests, not by production code.
+The native transport supports password, keytab, in-memory and file ccache
+credentials with mutual SPNEGO authentication and AES RFC 4121 message
+protection. Windows SSPI supports the same WinRM message protection using the
+current user's per-service ticket. Kerberos ticket requests and permitted
+enctypes are restricted to AES128 and AES256 (enctypes 17-20); non-AES ccache
+session keys are rejected and non-AES keytab entries are ignored. It does not
+provide credential delegation, channel binding, or automatic
+authentication-mode fallback. Python and system Kerberos tools are used only by
+opt-in comparison tests, not by production code.
 
 ### Diagnostic output safety
 

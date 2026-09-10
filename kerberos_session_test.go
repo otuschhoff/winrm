@@ -71,8 +71,13 @@ func TestKerberosCredentialPrecedence(t *testing.T) {
 	}
 	owner := &ClientKerberos{
 		Username: "user", Password: "password", Realm: "EXAMPLE.TEST", KrbConf: configPath,
-		KrbCCache: "/missing/ccache", KrbKeytab: "/missing/keytab",
+		KrbCCacheData: &credentials.CCache{Credentials: []*credentials.Credential{{Key: types.EncryptionKey{KeyType: 23}}}},
+		KrbCCache:     "/missing/ccache", KrbKeytab: "/missing/keytab",
 	}
+	if _, err := newKerberosCredentialClient(owner); err == nil || !strings.Contains(err.Error(), "in-memory ccache") {
+		t.Fatalf("in-memory ccache precedence error = %v", err)
+	}
+	owner.KrbCCacheData = nil
 	if _, err := newKerberosCredentialClient(owner); err == nil || !strings.Contains(err.Error(), "ccache") {
 		t.Fatalf("ccache precedence error = %v", err)
 	}
@@ -246,8 +251,8 @@ func TestKerberosSessionRejectsIncompleteAndInvalidAuthentication(t *testing.T) 
 			if err == nil || !strings.Contains(err.Error(), test.want) {
 				t.Fatalf("error = %v, want containing %q", err, test.want)
 			}
-			if session.state != kerberosSessionInvalid || session.adapter != nil {
-				t.Fatalf("failed bootstrap state = %d, adapter = %v", session.state, session.adapter)
+			if session.state != kerberosSessionInvalid || session.protector != nil {
+				t.Fatalf("failed bootstrap state = %d, protector = %v", session.state, session.protector)
 			}
 			var kerberosError *KerberosError
 			if !errors.As(err, &kerberosError) || kerberosError.Stage == "" {
@@ -642,6 +647,50 @@ func TestKerberosSessionCloseIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestKerberosSSPISessionLifecycle(t *testing.T) {
+	connection := &fixtureConnection{id: "sspi"}
+	authenticator := &fixtureKerberosSSPIAuthenticator{
+		protector:  &fixtureKerberosProtector{},
+		connection: connection,
+	}
+	session := newFixtureKerberosSession(&scriptedKerberosTransport{}, nil)
+	session.sspi = authenticator
+
+	if err := session.establishForTest(); err != nil {
+		t.Fatal(err)
+	}
+	if authenticator.establishCalls != 1 || session.protector != authenticator.protector || session.connection != connection || session.state != kerberosSessionEstablished {
+		t.Fatalf("established state = calls %d, protector %v, connection %v, state %d", authenticator.establishCalls, session.protector, session.connection, session.state)
+	}
+	session.invalidateLocked()
+	if authenticator.resetCalls != 1 || session.protector != nil || session.connection != nil || session.state != kerberosSessionInvalid {
+		t.Fatalf("invalidated state = resets %d, protector %v, connection %v, state %d", authenticator.resetCalls, session.protector, session.connection, session.state)
+	}
+	if err := session.close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.close(); err != nil {
+		t.Fatal(err)
+	}
+	if authenticator.closeCalls != 1 || session.state != kerberosSessionClosed {
+		t.Fatalf("closed state = closes %d, state %d", authenticator.closeCalls, session.state)
+	}
+}
+
+func TestKerberosSSPISessionResetsFailedContext(t *testing.T) {
+	authenticator := &fixtureKerberosSSPIAuthenticator{establishErr: errors.New("SSPI failed")}
+	session := newFixtureKerberosSession(&scriptedKerberosTransport{}, nil)
+	session.sspi = authenticator
+
+	err := session.establishForTest()
+	if err == nil || !strings.Contains(err.Error(), "SSPI failed") {
+		t.Fatalf("establish error = %v", err)
+	}
+	if authenticator.establishCalls != 1 || authenticator.resetCalls != 1 || session.state != kerberosSessionInvalid {
+		t.Fatalf("failed state = establishes %d, resets %d, state %d", authenticator.establishCalls, authenticator.resetCalls, session.state)
+	}
+}
+
 func TestKerberosSessionCanceledWaiterDoesNotBlock(t *testing.T) {
 	session := &kerberosSession{}
 	if err := session.acquire(context.Background()); err != nil {
@@ -711,6 +760,40 @@ type fixtureKerberosNegotiator struct {
 	unauthenticatedFirst bool
 	context              gssapi.Context
 	err                  error
+}
+
+type fixtureKerberosProtector struct{}
+
+func (*fixtureKerberosProtector) wrap(message []byte) ([]byte, []byte, error) {
+	return []byte("header"), append([]byte(nil), message...), nil
+}
+
+func (*fixtureKerberosProtector) unwrap(_ []byte, payload []byte) ([]byte, error) {
+	return append([]byte(nil), payload...), nil
+}
+
+type fixtureKerberosSSPIAuthenticator struct {
+	protector      kerberosMessageProtector
+	connection     net.Conn
+	establishErr   error
+	establishCalls int
+	resetCalls     int
+	closeCalls     int
+}
+
+func (authenticator *fixtureKerberosSSPIAuthenticator) establish(context.Context, *http.Client, string, string) (kerberosMessageProtector, net.Conn, error) {
+	authenticator.establishCalls++
+	return authenticator.protector, authenticator.connection, authenticator.establishErr
+}
+
+func (authenticator *fixtureKerberosSSPIAuthenticator) reset() error {
+	authenticator.resetCalls++
+	return nil
+}
+
+func (authenticator *fixtureKerberosSSPIAuthenticator) close() error {
+	authenticator.closeCalls++
+	return nil
 }
 
 func (negotiator *fixtureKerberosNegotiator) Do(request *http.Request) (*http.Response, error) {
