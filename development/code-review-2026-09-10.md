@@ -248,6 +248,8 @@ These phases are separate from historical feature phases in other documents. Pha
 
 **Dependencies:** B for consistent transport cleanup. **Findings:** R1, R9, R11.
 
+**Status:** complete on 2026-09-10. Implementation and final gate evidence are recorded in [Phase C command cancellation and lifecycle](phase-c-implementation.md).
+
 | Task | Owning slice | Implementation and acceptance |
 | --- | --- | --- |
 | C1 | [client.go](../client.go), [command.go](../command.go), [command_context_test.go](../command_context_test.go) | Close/cancel internal stream ownership on sink failure/cancellation. Test two non-final responses, stdout/stderr failure and unread streams. Return original error; done closes; active-command set returns to baseline; no blocked fetch remains. |

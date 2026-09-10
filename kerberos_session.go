@@ -43,7 +43,8 @@ type kerberosNegotiator interface {
 }
 
 type kerberosSession struct {
-	mu                sync.Mutex
+	gate              chan struct{}
+	gateOnce          sync.Once
 	state             kerberosSessionState
 	endpoint          string
 	spn               string
@@ -152,8 +153,10 @@ func newKerberosCredentialClient(owner *ClientKerberos) (*client.Client, error) 
 }
 
 func (session *kerberosSession) post(ctx context.Context, message string, maxPlaintextSize int) (string, error) {
-	session.mu.Lock()
-	defer session.mu.Unlock()
+	if err := session.acquire(ctx); err != nil {
+		return "", &KerberosError{Stage: "queue", Err: err}
+	}
+	defer session.release()
 	if session.state == kerberosSessionClosed {
 		return "", &KerberosError{Stage: "config", Err: errors.New("Kerberos session is closed")}
 	}
@@ -164,6 +167,30 @@ func (session *kerberosSession) post(ctx context.Context, message string, maxPla
 		return session.postEncryptedLocked(ctx, message, maxPlaintextSize)
 	}
 	return session.postPlaintextLocked(ctx, message, maxPlaintextSize)
+}
+
+func (session *kerberosSession) acquire(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	session.gateOnce.Do(func() {
+		session.gate = make(chan struct{}, 1)
+		session.gate <- struct{}{}
+	})
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-session.gate:
+		if err := ctx.Err(); err != nil {
+			session.release()
+			return err
+		}
+		return nil
+	}
+}
+
+func (session *kerberosSession) release() {
+	session.gate <- struct{}{}
 }
 
 func (session *kerberosSession) postEncryptedLocked(ctx context.Context, message string, maxPlaintextSize int) (string, error) {
@@ -343,8 +370,16 @@ func (session *kerberosSession) invalidateLocked() {
 }
 
 func (session *kerberosSession) close() error {
-	session.mu.Lock()
-	defer session.mu.Unlock()
+	ctx, cancel := context.WithTimeout(context.Background(), commandCleanupTimeout)
+	defer cancel()
+	return session.closeWithContext(ctx)
+}
+
+func (session *kerberosSession) closeWithContext(ctx context.Context) error {
+	if err := session.acquire(ctx); err != nil {
+		return &KerberosError{Stage: "close", Err: err}
+	}
+	defer session.release()
 	if session.state == kerberosSessionClosed {
 		return nil
 	}
