@@ -9,12 +9,16 @@ import (
 	"net/http/httptest"
 	"net/http/httptrace"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/otuschhoff/gokrb5/v8/config"
+	"github.com/otuschhoff/gokrb5/v8/credentials"
 	"github.com/otuschhoff/gokrb5/v8/gssapi"
+	"github.com/otuschhoff/gokrb5/v8/keytab"
 	"github.com/otuschhoff/gokrb5/v8/spnego"
 	"github.com/otuschhoff/gokrb5/v8/types"
 )
@@ -82,6 +86,56 @@ func TestKerberosCredentialPrecedence(t *testing.T) {
 		t.Fatal(err)
 	}
 	kerberosClient.Destroy()
+}
+
+func TestEnforceAESOnlyKerberosConfig(t *testing.T) {
+	cfg := config.New()
+	cfg.LibDefaults.AllowWeakCrypto = true
+	cfg.LibDefaults.DefaultTktEnctypes = []string{"arcfour-hmac-md5"}
+	cfg.LibDefaults.DefaultTGSEnctypes = []string{"arcfour-hmac-md5"}
+	cfg.LibDefaults.PermittedEnctypes = []string{"arcfour-hmac-md5"}
+	cfg.LibDefaults.DefaultTktEnctypeIDs = []int32{23}
+	cfg.LibDefaults.DefaultTGSEnctypeIDs = []int32{23}
+	cfg.LibDefaults.PermittedEnctypeIDs = []int32{23}
+
+	enforceAESOnlyKerberosConfig(cfg)
+	if cfg.LibDefaults.AllowWeakCrypto ||
+		!slices.Equal(cfg.LibDefaults.DefaultTktEnctypes, aesKerberosEnctypeNames) ||
+		!slices.Equal(cfg.LibDefaults.DefaultTGSEnctypes, aesKerberosEnctypeNames) ||
+		!slices.Equal(cfg.LibDefaults.PermittedEnctypes, aesKerberosEnctypeNames) ||
+		!slices.Equal(cfg.LibDefaults.DefaultTktEnctypeIDs, aesKerberosEnctypeIDs) ||
+		!slices.Equal(cfg.LibDefaults.DefaultTGSEnctypeIDs, aesKerberosEnctypeIDs) ||
+		!slices.Equal(cfg.LibDefaults.PermittedEnctypeIDs, aesKerberosEnctypeIDs) {
+		t.Fatalf("Kerberos config was not restricted to AES: %+v", cfg.LibDefaults)
+	}
+}
+
+func TestAESOnlyKerberosCredentialKeys(t *testing.T) {
+	cache := &credentials.CCache{Credentials: []*credentials.Credential{
+		{Key: types.EncryptionKey{KeyType: 18}},
+		{Key: types.EncryptionKey{KeyType: 23}},
+	}}
+	if err := validateAESOnlyCCache(cache); err == nil || !strings.Contains(err.Error(), "non-AES") {
+		t.Fatalf("RC4 ccache validation error = %v, want non-AES rejection", err)
+	}
+	cache.Credentials = cache.Credentials[:1]
+	if err := validateAESOnlyCCache(cache); err != nil {
+		t.Fatalf("AES ccache validation: %v", err)
+	}
+
+	entries := []keytab.Entry{
+		{Key: types.EncryptionKey{KeyType: 17}},
+		{Key: types.EncryptionKey{KeyType: 23}},
+		{Key: types.EncryptionKey{KeyType: 20}},
+	}
+	filtered := filterAESKeytabEntries(entries)
+	keyTypes := make([]int32, len(filtered))
+	for index, entry := range filtered {
+		keyTypes[index] = entry.Key.KeyType
+	}
+	if !slices.Equal(keyTypes, []int32{17, 20}) {
+		t.Fatalf("filtered keytab enctypes = %v, want [17 20]", keyTypes)
+	}
 }
 
 func TestKerberosCredentialSourceErrors(t *testing.T) {

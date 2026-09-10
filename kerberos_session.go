@@ -18,6 +18,7 @@ import (
 	"github.com/otuschhoff/gokrb5/v8/config"
 	"github.com/otuschhoff/gokrb5/v8/credentials"
 	"github.com/otuschhoff/gokrb5/v8/gssapi"
+	"github.com/otuschhoff/gokrb5/v8/iana/etypeID"
 	"github.com/otuschhoff/gokrb5/v8/keytab"
 	"github.com/otuschhoff/gokrb5/v8/spnego"
 )
@@ -125,6 +126,7 @@ func newKerberosCredentialClient(owner *ClientKerberos) (*client.Client, error) 
 	if err != nil {
 		return nil, fmt.Errorf("load Kerberos configuration: %w", err)
 	}
+	enforceAESOnlyKerberosConfig(cfg)
 	if owner.KrbCCache != "" {
 		encoded, err := os.ReadFile(owner.KrbCCache)
 		if err != nil {
@@ -133,6 +135,9 @@ func newKerberosCredentialClient(owner *ClientKerberos) (*client.Client, error) 
 		cache := new(credentials.CCache)
 		if err := cache.Unmarshal(encoded); err != nil {
 			return nil, fmt.Errorf("parse ccache file %q: %w", owner.KrbCCache, err)
+		}
+		if err := validateAESOnlyCCache(cache); err != nil {
+			return nil, fmt.Errorf("validate ccache file %q: %w", owner.KrbCCache, err)
 		}
 		kerberosClient, err := client.NewFromCCache(cache, cfg, client.DisablePAFXFAST(true))
 		if err != nil {
@@ -145,11 +150,70 @@ func newKerberosCredentialClient(owner *ClientKerberos) (*client.Client, error) 
 		if err != nil {
 			return nil, fmt.Errorf("read keytab file %q: %w", owner.KrbKeytab, err)
 		}
+		kt.Entries = filterAESKeytabEntries(kt.Entries)
+		if len(kt.Entries) == 0 {
+			return nil, fmt.Errorf("keytab file %q contains no AES keys", owner.KrbKeytab)
+		}
 		return client.NewWithKeytab(owner.Username, owner.Realm, kt, cfg,
 			client.DisablePAFXFAST(true), client.AssumePreAuthentication(true)), nil
 	}
 	return client.NewWithPassword(owner.Username, owner.Realm, owner.Password, cfg,
 		client.DisablePAFXFAST(true), client.AssumePreAuthentication(true)), nil
+}
+
+var aesKerberosEnctypeNames = []string{
+	"aes128-cts-hmac-sha1-96",
+	"aes256-cts-hmac-sha1-96",
+	"aes128-cts-hmac-sha256-128",
+	"aes256-cts-hmac-sha384-192",
+}
+
+var aesKerberosEnctypeIDs = []int32{
+	etypeID.AES128_CTS_HMAC_SHA1_96,
+	etypeID.AES256_CTS_HMAC_SHA1_96,
+	etypeID.AES128_CTS_HMAC_SHA256_128,
+	etypeID.AES256_CTS_HMAC_SHA384_192,
+}
+
+func enforceAESOnlyKerberosConfig(cfg *config.Config) {
+	cfg.LibDefaults.AllowWeakCrypto = false
+	cfg.LibDefaults.DefaultTktEnctypes = append([]string(nil), aesKerberosEnctypeNames...)
+	cfg.LibDefaults.DefaultTGSEnctypes = append([]string(nil), aesKerberosEnctypeNames...)
+	cfg.LibDefaults.PermittedEnctypes = append([]string(nil), aesKerberosEnctypeNames...)
+	cfg.LibDefaults.DefaultTktEnctypeIDs = append([]int32(nil), aesKerberosEnctypeIDs...)
+	cfg.LibDefaults.DefaultTGSEnctypeIDs = append([]int32(nil), aesKerberosEnctypeIDs...)
+	cfg.LibDefaults.PermittedEnctypeIDs = append([]int32(nil), aesKerberosEnctypeIDs...)
+}
+
+func isAESKerberosEnctype(keyType int32) bool {
+	for _, allowed := range aesKerberosEnctypeIDs {
+		if keyType == allowed {
+			return true
+		}
+	}
+	return false
+}
+
+func validateAESOnlyCCache(cache *credentials.CCache) error {
+	for _, credential := range cache.Credentials {
+		if credential == nil || !isAESKerberosEnctype(credential.Key.KeyType) {
+			if credential == nil {
+				return errors.New("ccache contains an invalid credential")
+			}
+			return fmt.Errorf("ccache contains non-AES session key enctype %d", credential.Key.KeyType)
+		}
+	}
+	return nil
+}
+
+func filterAESKeytabEntries(entries []keytab.Entry) []keytab.Entry {
+	filtered := make([]keytab.Entry, 0, len(entries))
+	for _, entry := range entries {
+		if isAESKerberosEnctype(entry.Key.KeyType) {
+			filtered = append(filtered, entry)
+		}
+	}
+	return filtered
 }
 
 func (session *kerberosSession) post(ctx context.Context, message string, maxPlaintextSize int) (string, error) {

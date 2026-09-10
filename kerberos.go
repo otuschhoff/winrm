@@ -13,11 +13,11 @@ import (
 
 const (
 	// KerberosEncryptionAuto seals SOAP on HTTP and relies on TLS on HTTPS.
-	KerberosEncryptionAuto   = "auto"
+	KerberosEncryptionAuto = "auto"
 	// KerberosEncryptionAlways seals SOAP on both HTTP and HTTPS.
 	KerberosEncryptionAlways = "always"
 	// KerberosEncryptionNever explicitly disables GSS message encryption.
-	KerberosEncryptionNever  = "never"
+	KerberosEncryptionNever = "never"
 )
 
 // Settings holds all the information necessary to configure the provider
@@ -34,7 +34,6 @@ type Settings struct {
 	KrbCCache            string
 	KrbKeytab            string
 	KrbMessageEncryption string
-	WinRMUseNTLM         bool
 	WinRMPassCredentials bool
 }
 

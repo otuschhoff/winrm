@@ -43,7 +43,7 @@ The helper consumed an entire synthetic 1 MiB response; closing its replacement 
 
 ### R4. High: Reachable vulnerability in the Azure NTLM dependency
 
-**Evidence: scanner-reported.** `govulncheck v1.8.0` reported [GO-2026-5543](https://pkg.go.dev/vuln/GO-2026-5543): malformed NTLM challenges can panic in `github.com/Azure/go-ntlmssp`, pinned to `v0.0.0-20221128193559-754e69321358` in [go.mod](../go.mod#L6). The reported fixed version is `v0.1.1`. The negotiator is installed by [ntlm.go](../ntlm.go#L19).
+**Evidence: scanner-reported.** `govulncheck v1.8.0` reported [GO-2026-5543](https://pkg.go.dev/vuln/GO-2026-5543): malformed NTLM challenges can panic in `github.com/Azure/go-ntlmssp`, pinned to `v0.0.0-20221128193559-754e69321358` in [go.mod](../go.mod#L6). The reported fixed version is `v0.1.1`. The removed negotiator was implemented in `ntlm.go`.
 
 **Impact:** malformed authentication challenges can crash users of the Azure NTLM path. The scanner's example trace passes through a generic `RoundTripper` call in the Kerberos wrapper; this interface-analysis trace does not prove that configured Kerberos-only authentication uses Azure NTLM.
 
@@ -51,7 +51,7 @@ The helper consumed an entire synthetic 1 MiB response; closing its replacement 
 
 ### R5. High: Legacy NTLM encryption silently downgrades and ignores transport settings
 
-**Evidence: source-confirmed.** [encryption.go](../encryption.go#L77) creates a bare `http.Client` but configures TLS/routing on a different embedded transport. Encrypted requests therefore do not use that configured CA, insecurity setting, or endpoint timeout. [encryption.go](../encryption.go#L96) ignores constructor errors and replaces shared authentication state each Post. Any bootstrap error triggers the non-message-encrypting NTLM fallback at [encryption.go](../encryption.go#L103). [encryption.go](../encryption.go#L201) accepts responses lacking the expected encrypted protocol as plaintext.
+**Evidence: source-confirmed.** The removed `encryption.go` created a bare `http.Client` but configured TLS/routing on a different embedded transport. Encrypted requests therefore did not use that configured CA, insecurity setting, or endpoint timeout. It ignored constructor errors, replaced shared authentication state on each Post, retried bootstrap failures through non-message-encrypting NTLM, and accepted responses lacking the expected encrypted protocol as plaintext.
 
 **Impact:** selecting encryption does not guarantee encrypted SOAP over HTTP. Configuration differs between paths, and concurrent use of one `Encryption` instance races shared authentication state. Existing race tests do not execute this implementation (0% statement coverage).
 
@@ -59,7 +59,7 @@ The helper consumed an entire synthetic 1 MiB response; closing its replacement 
 
 ### R6. High: Malformed legacy encrypted responses panic and lack resource bounds
 
-**Evidence: runtime- and source-confirmed.** [encryption.go](../encryption.go#L245) assumes paired MIME parts and `Length=` metadata, reads without a limit, ignores read errors, and does not close the encrypted response body. [encryption.go](../encryption.go#L296) slices signature data without first checking available lengths. A synthetic body `invalid` panicked with index out of range before any crypto operation.
+**Evidence: runtime- and source-confirmed.** The removed `encryption.go` assumed paired MIME parts and `Length=` metadata, read without a limit, ignored read errors, did not close the encrypted response body, and sliced signature data without checking available lengths. A synthetic body `invalid` panicked with index out of range before any crypto operation.
 
 **Impact:** endpoint-controlled crash, unlimited response allocation, and resource leakage. This is independent of the upstream challenge-parser vulnerability in R4. **Fix:** bounded reads, checked part/header/slice lengths, strict protocol/length validation, guaranteed close, and error propagation. Reuse Kerberos framing principles without conflating NTLM and Kerberos token formats. Add direct legacy-parser fuzzing.
 
@@ -119,7 +119,7 @@ The default HTTP client has no total timeout; `ResponseHeaderTimeout` does not b
 
 **Evidence: source-confirmed; hosted lint not executed.** [.golangci.yml](../.golangci.yml#L1) uses Go 1.21 settings and obsolete linter names; [go.mod](../go.mod#L3) requires Go 1.26. The [lint workflow](../.github/workflows/lint.yaml#L25) combines action v3 with floating `latest`, not a reproducible tool/config pairing. It ignores dependency/configuration-only PRs. The [test workflow](../.github/workflows/go.yml#L28) runs `make ci` without explicit pure-Go, race, fuzz, or vulnerability gates.
 
-[Makefile](../Makefile#L11) fetches dependencies during tests and uses obsolete flags in its update target. [README.md](../README.md#L439) gives outdated cancellation guidance, names nonexistent `command.Stop`, and later says Go 1.5+. Examples mutate shared `DefaultParameters`, omit imports/qualifiers, or disable verification. Commented-out protocol placeholders in [encryption.go](../encryption.go) obscure actual support.
+[Makefile](../Makefile#L11) fetches dependencies during tests and uses obsolete flags in its update target. [README.md](../README.md#L439) gives outdated cancellation guidance, names nonexistent `command.Stop`, and later says Go 1.5+. Examples mutate shared `DefaultParameters`, omit imports/qualifiers, or disable verification. Commented-out protocol placeholders in the removed `encryption.go` obscured actual support.
 
 **Impact:** misleading usage guidance, unreproducible checks, global configuration coupling, and overconfidence in release gates. **Fix:** pin compatible tooling, expand workflow triggers/gates, compile examples, copy defaults before customization, document transport-specific contracts, and remove dead placeholders separately from behavioral fixes.
 
@@ -166,7 +166,7 @@ Physical lines include comments/blank lines and are not a complexity score. Base
 
 | File | Covered statements | Coverage |
 | --- | --- | --- |
-| [encryption.go](../encryption.go) | 0 / 187 | **0.0%** |
+| `encryption.go` (removed) | 0 / 187 | **0.0%** |
 | [auth.go](../auth.go) | 14 / 53 | **26.4%**; Post/response parser 0% |
 | [debug_http.go](../debug_http.go) | 22 / 94 | **23.4%**; response reader/header dump 0% |
 | [debug_capture.go](../debug_capture.go) | 69 / 90 | 76.7%; permissions/redaction not asserted |
@@ -224,9 +224,9 @@ These phases are separate from historical feature phases in other documents. Pha
 
 | Task | Owning slice | Implementation and acceptance |
 | --- | --- | --- |
-| A1 | [go.mod](../go.mod), [go.sum](../go.sum), [ntlm_test.go](../ntlm_test.go) | Upgrade Azure NTLM to a reviewed compatible fixed version without unrelated churn. Add malformed-challenge regression. NTLM/pure-Go tests pass; scanner no longer reports reachable GO-2026-5543. Record module-only advisories separately. |
+| A1 | [go.mod](../go.mod), [go.sum](../go.sum), `ntlm_test.go` (removed) | Upgrade Azure NTLM to a reviewed compatible fixed version without unrelated churn. Add malformed-challenge regression. NTLM/pure-Go tests pass; scanner no longer reports reachable GO-2026-5543. Record module-only advisories separately. |
 | A2 | [debug_capture.go](../debug_capture.go), [debug_http.go](../debug_http.go), adjacent tests | Define default redaction and explicit unsafe mode; create new Unix files at 0600 and decide existing-file policy. Synthetic secrets absent in safe mode; auth/cookie headers redacted; disabled mode creates no files. Verify supported-platform behavior. |
-| A3 | [encryption.go](../encryption.go), transport docs | Remove silent error fallback and reject unexpected plaintext for encrypted exchanges. Fake bootstrap failure must cause no plaintext SOAP retry. Document limits until Phase D; disabling/removing the public transport needs an explicit compatibility decision. |
+| A3 | `encryption.go` (removed), transport docs | Remove silent error fallback and reject unexpected plaintext for encrypted exchanges. Fake bootstrap failure must cause no plaintext SOAP retry. Document limits until Phase D; disabling/removing the public transport needs an explicit compatibility decision. |
 
 **Gate:** focused security tests, pure-Go suite, pinned vulnerability scan. Base64 is not safe capture. Do not auto-upload raw diagnostic data to CI.
 
@@ -262,9 +262,11 @@ These phases are separate from historical feature phases in other documents. Pha
 
 **Dependencies:** A1/A3 and B; apply C ownership rules. **Findings:** remainder of R5, R6.
 
+**Status:** superseded on 2026-09-10 by [NTLM removal and AES-only Kerberos](ntlm-removal-2026-09-10.md).
+
 | Task | Owning slice | Implementation and acceptance |
 | --- | --- | --- |
-| D1 | [encryption.go](../encryption.go), focused encryption tests | Use configured transport, propagate constructor/wrap failures, context/close support, serialized authentication/sequence state. Test custom CA, routing, timeout and concurrent failure through the encrypted path, not fallback. |
+| D1 | `encryption.go` (removed), focused encryption tests | Use configured transport, propagate constructor/wrap failures, context/close support, serialized authentication/sequence state. Test custom CA, routing, timeout and concurrent failure through the encrypted path, not fallback. |
 | D2 | Legacy multipart/signature parser | Bounded parsing with checked counts/lengths/exact metadata; close on every exit. Malformed-input tables and direct fuzz targets: no panic, oversized allocation, or plaintext acceptance. |
 
 **Gate:** targeted race tests, malformed corpus, each new fuzz target for at least 30 seconds, pure-Go suite. A separately approved live NTLM-encryption success gate is required before claiming server interoperability.

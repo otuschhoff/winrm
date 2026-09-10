@@ -54,7 +54,7 @@ Repository anchors:
 - [kerberos.go](../kerberos.go) and [kerberos_session.go](../kerberos_session.go):
   retain credentials and an established connection-bound GSS context, bootstrap
   with an empty POST, and protect SOAP using the established context.
-- [encryption.go](../encryption.go): NTLM-specific encryption implementation;
+- `encryption.go` (removed): former NTLM-specific encryption implementation;
   Kerberos support is explicitly unimplemented. Do not copy its plaintext
   fallback behavior into the new Kerberos implementation.
 - [http.go](../http.go): shared HTTP/TLS/proxy/dial configuration.
