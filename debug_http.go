@@ -71,14 +71,20 @@ func debugHTTPRoundTrip(req *http.Request, resp *http.Response, err error) {
 
 	fmt.Fprintf(os.Stderr, "[DEBUG][HTTP][%d] status=%s\n", id, resp.Status)
 	dumpHeaders(id, resp.Header, unsafe)
-	body, bodyErr := readAndRestoreResponseBody(resp)
-	if bodyErr != nil {
-		fmt.Fprintf(os.Stderr, "[DEBUG][HTTP][%d] response-body-error: %s\n", id, formatDebugError(bodyErr, unsafe))
-	} else {
-		fmt.Fprintf(os.Stderr, "[DEBUG][HTTP][%d] response-body-bytes=%d\n", id, len(body))
-		dumpDebugBody(id, body, unsafe)
-	}
 	fmt.Fprintf(os.Stderr, "[DEBUG][HTTP][%d] -----------------\n", id)
+}
+
+func debugHTTPResponseBody(body []byte, err error) {
+	if !HTTPDebugEnabled() {
+		return
+	}
+	id := httpDebugCounter.Add(1)
+	unsafe := HTTPDebugUnsafeEnabled()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "[DEBUG][HTTP][%d] response-body-error: %s\n", id, formatDebugError(err, unsafe))
+	}
+	fmt.Fprintf(os.Stderr, "[DEBUG][HTTP][%d] response-body-bytes=%d\n", id, len(body))
+	dumpDebugBody(id, body, unsafe)
 }
 
 func dumpDebugBody(id uint64, body []byte, unsafe bool) {
@@ -177,18 +183,6 @@ func readRequestBodyForDebug(req *http.Request) ([]byte, error) {
 	}
 	defer body.Close()
 	return io.ReadAll(body)
-}
-
-func readAndRestoreResponseBody(resp *http.Response) ([]byte, error) {
-	if resp == nil || resp.Body == nil {
-		return nil, nil
-	}
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, err
-	}
-	resp.Body = io.NopCloser(bytes.NewReader(body))
-	return body, nil
 }
 
 func dumpHeaders(id uint64, headers http.Header, unsafe bool) {

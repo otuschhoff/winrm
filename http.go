@@ -3,11 +3,14 @@ package winrm
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -16,42 +19,72 @@ import (
 
 var soapXML = "application/soap+xml"
 
-// body func reads the response body and return it as a string
-func body(response *http.Response) (string, error) {
-	// if we received the content we expected
-	if strings.Contains(response.Header.Get("Content-Type"), "application/soap+xml") {
-		body, err := io.ReadAll(response.Body)
-		defer func() {
-			// defer can modify the returned value before
-			// it is actually passed to the calling statement
-			if errClose := response.Body.Close(); errClose != nil && err == nil {
-				err = errClose
-			}
-		}()
-		if err != nil {
-			return "", fmt.Errorf("error while reading request body %w", err)
-		}
+type httpResponseError struct {
+	statusCode int
+	body       string
+}
 
-		return string(body), nil
+func (responseError *httpResponseError) Error() string {
+	return fmt.Sprintf("HTTP response status %d", responseError.statusCode)
+}
+
+func readSOAPResponse(response *http.Response, maxBodySize int) (result string, err error) {
+	if response == nil || response.Body == nil {
+		return "", errors.New("HTTP response body is missing")
+	}
+	defer func() {
+		err = errors.Join(err, response.Body.Close())
+	}()
+	if maxBodySize <= 0 {
+		return "", errors.New("positive envelope size is required")
 	}
 
-	return "", fmt.Errorf("invalid content type")
+	contentType := response.Header.Get("Content-Type")
+	mediaType, _, mediaTypeErr := mime.ParseMediaType(contentType)
+	if mediaTypeErr != nil || !strings.EqualFold(mediaType, soapXML) {
+		return "", fmt.Errorf("HTTP response status %d has invalid SOAP content type %q", response.StatusCode, contentType)
+	}
+
+	body, readErr := readBoundedResponseBody(response.Body, maxBodySize)
+	debugHTTPResponseBody(body, readErr)
+	if readErr != nil {
+		return "", fmt.Errorf("read HTTP response body: %w", readErr)
+	}
+	if response.StatusCode != http.StatusOK {
+		return "", &httpResponseError{statusCode: response.StatusCode, body: string(body)}
+	}
+	return string(body), nil
+}
+
+func readBoundedResponseBody(reader io.Reader, limit int) ([]byte, error) {
+	if limit < 0 {
+		return nil, errors.New("response body limit cannot be negative")
+	}
+	readLimit := int64(limit)
+	if readLimit < int64(^uint64(0)>>1) {
+		readLimit++
+	}
+	body, err := io.ReadAll(io.LimitReader(reader, readLimit))
+	if err != nil {
+		return body, err
+	}
+	if len(body) > limit {
+		return body, fmt.Errorf("response body exceeds limit %d", limit)
+	}
+	return body, nil
 }
 
 type clientRequest struct {
 	transport http.RoundTripper
 	dial      func(network, addr string) (net.Conn, error)
 	proxyfunc func(req *http.Request) (*url.URL, error)
+	timeout   time.Duration
 }
 
 func (c *clientRequest) Transport(endpoint *Endpoint) error {
-	dial := (&net.Dialer{
+	dialer := &net.Dialer{
 		Timeout:   30 * time.Second,
 		KeepAlive: 30 * time.Second,
-	}).Dial
-
-	if c.dial != nil {
-		dial = c.dial
 	}
 
 	proxyfunc := http.ProxyFromEnvironment
@@ -66,11 +99,15 @@ func (c *clientRequest) Transport(endpoint *Endpoint) error {
 			InsecureSkipVerify: endpoint.Insecure,
 			ServerName:         endpoint.TLSServerName,
 		},
-		Dial:                  dial,
+		DialContext:           dialer.DialContext,
 		ResponseHeaderTimeout: endpoint.Timeout,
 	}
+	if c.dial != nil {
+		transport.DialContext = nil
+		transport.Dial = c.dial
+	}
 
-	if endpoint.CACert != nil && len(endpoint.CACert) > 0 {
+	if len(endpoint.CACert) > 0 {
 		certPool, err := readCACerts(endpoint.CACert)
 		if err != nil {
 			return err
@@ -80,6 +117,7 @@ func (c *clientRequest) Transport(endpoint *Endpoint) error {
 	}
 
 	c.transport = transport
+	c.timeout = endpoint.Timeout
 
 	return nil
 }
@@ -91,7 +129,7 @@ func (c clientRequest) Post(client *Client, request *soap.SoapMessage) (string, 
 
 // PostContext makes a POST request using the caller's cancellation and deadline.
 func (c clientRequest) PostContext(ctx context.Context, client *Client, request *soap.SoapMessage) (string, error) {
-	httpClient := &http.Client{Transport: c.transport}
+	httpClient := &http.Client{Transport: c.transport, Timeout: c.timeout}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", client.url, strings.NewReader(request.String()))
 	if err != nil {
@@ -102,23 +140,25 @@ func (c clientRequest) PostContext(ctx context.Context, client *Client, request 
 	resp, err := httpClient.Do(req)
 	debugHTTPRoundTrip(req, resp, err)
 	if err != nil {
+		if os.IsTimeout(err) {
+			return "", fmt.Errorf("HTTP request timeout: %w", err)
+		}
 		return "", fmt.Errorf("unknown error %w", err)
 	}
 
-	body, err := body(resp)
+	body, err := readSOAPResponse(resp, client.EnvelopeSize)
 	if err != nil {
-		return "", fmt.Errorf("http response error: %d - %w", resp.StatusCode, err)
+		return "", fmt.Errorf("HTTP response error: %w", err)
 	}
+	return body, nil
+}
 
-	// if we have different 200 http status code
-	// we must replace the error
-	defer func() {
-		if resp.StatusCode != 200 {
-			body, err = "", fmt.Errorf("http error %d: %s", resp.StatusCode, body)
-		}
-	}()
-
-	return body, err
+// Close releases idle connections owned by the built-in HTTP transport.
+func (c *clientRequest) Close() error {
+	if closer, ok := c.transport.(interface{ CloseIdleConnections() }); ok {
+		closer.CloseIdleConnections()
+	}
+	return nil
 }
 
 // NewClientWithDial NewClientWithDial

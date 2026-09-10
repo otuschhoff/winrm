@@ -128,6 +128,13 @@ if err != nil {
 
 By passing a TransportDecorator in the Parameters struct it is possible to use different Transports (e.g. NTLM)
 
+The built-in default, NTLM, certificate, and Kerberos transports honor caller
+contexts and endpoint timeouts across response-body reads. `Client.Close`
+releases their idle HTTP connections. A third-party `Transporter` that only
+implements `Post` remains supported for compatibility, but cannot receive the
+caller context; implement `PostContext` and `Close` to provide cancellation and
+resource cleanup.
+
 ```go
 package main
 import (
