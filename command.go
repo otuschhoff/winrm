@@ -4,9 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
-	"net/url"
-	"strings"
 	"sync"
 	"time"
 )
@@ -234,17 +233,16 @@ func (c *Command) slurpAllOutput() (bool, error) {
 
 	response, err := c.client.sendRequestContext(c.ctx, request)
 	if err != nil {
-		var errWithTimeout *url.Error
-		if errors.As(err, &errWithTimeout) && errWithTimeout.Timeout() {
-			// Operation timeout because the server didn't respond in time
-			return false, err
-		}
 		var responseError *httpResponseError
-		if errors.As(err, &responseError) && strings.Contains(responseError.body, "OperationTimeout") || strings.Contains(err.Error(), "OperationTimeout") {
-			// Operation timeout because there was no command output
+		if errors.As(err, &responseError) {
+			if fault, faultErr := parseSOAPFaultResponse(responseError.body); faultErr == nil {
+				err = fault
+			}
+		}
+		if errors.Is(err, ErrOperationTimeout) {
 			return false, err
 		}
-		if strings.Contains(err.Error(), "EOF") {
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
 			c.stateMu.Lock()
 			c.exitCode = 16001
 			c.stateMu.Unlock()
@@ -257,8 +255,11 @@ func (c *Command) slurpAllOutput() (bool, error) {
 
 	var exitCode int
 	var stdout, stderr bytes.Buffer
-	finished, exitCode, err := ParseSlurpOutputErrResponse(response, &stdout, &stderr)
+	finished, exitCode, err := parseSlurpOutputErrResponse(response, &stdout, &stderr, c.id)
 	if err != nil {
+		if errors.Is(err, ErrOperationTimeout) {
+			return false, err
+		}
 		c.Stderr.write.CloseWithError(err)
 		c.Stdout.write.CloseWithError(err)
 		return true, err
@@ -293,6 +294,10 @@ func (c *Command) sendInput(data []byte, eof bool) error {
 
 	request := NewSendInputRequest(c.client.url, c.shell.id, c.id, data, eof, &c.client.Parameters)
 	defer request.Free()
+	requestSize := len(request.String())
+	if requestSize > c.client.Parameters.EnvelopeSize {
+		return fmt.Errorf("command input request size %d exceeds envelope size %d", requestSize, c.client.Parameters.EnvelopeSize)
+	}
 
 	_, err := c.client.sendRequestContext(c.ctx, request)
 	return err
@@ -330,9 +335,13 @@ func (w *commandWriter) write(data []byte, eof bool) (int, error) {
 	if w.eof {
 		return 0, io.ErrClosedPipe
 	}
-	chunkSize := w.client.Parameters.EnvelopeSize - 1000
-	if chunkSize <= 0 {
-		return 0, errors.New("envelope size is too small for command input")
+	if eof && len(data) > 0 {
+		request := NewSendInputRequest(w.client.url, w.shell.id, w.id, data[:1], true, &w.client.Parameters)
+		minimumFinalSize := len(request.String())
+		request.Free()
+		if minimumFinalSize > w.client.Parameters.EnvelopeSize {
+			return 0, fmt.Errorf("envelope size %d is too small for command input metadata", w.client.Parameters.EnvelopeSize)
+		}
 	}
 
 	var (
@@ -341,8 +350,11 @@ func (w *commandWriter) write(data []byte, eof bool) (int, error) {
 	)
 	origLen := len(data)
 	for len(data) > 0 {
-		// never send more data than our EnvelopeSize.
-		n := min(chunkSize, len(data))
+		n, sizeErr := w.maxInputChunkSize(data, eof)
+		if sizeErr != nil {
+			err = sizeErr
+			break
+		}
 		last := n == len(data)
 		if err = w.sendInput(data[:n], eof && last); err != nil {
 			break
@@ -365,18 +377,42 @@ func (w *commandWriter) write(data []byte, eof bool) (int, error) {
 	return written, err
 }
 
+func (w *commandWriter) maxInputChunkSize(data []byte, eof bool) (int, error) {
+	limit := w.client.Parameters.EnvelopeSize
+	if limit <= 0 {
+		return 0, errors.New("envelope size is too small for command input")
+	}
+	best := 0
+	for low, high := 1, len(data); low <= high; {
+		candidate := low + (high-low)/2
+		request := NewSendInputRequest(
+			w.client.url,
+			w.shell.id,
+			w.id,
+			data[:candidate],
+			eof && candidate == len(data),
+			&w.client.Parameters,
+		)
+		requestSize := len(request.String())
+		request.Free()
+		if requestSize <= limit {
+			best = candidate
+			low = candidate + 1
+		} else {
+			high = candidate - 1
+		}
+	}
+	if best == 0 {
+		return 0, fmt.Errorf("envelope size %d is too small for command input metadata", limit)
+	}
+	return best, nil
+}
+
 // Write data to this Pipe and mark EOF
 func (w *commandWriter) WriteClose(data []byte) (int, error) {
 	w.mutex.Lock()
 	defer w.mutex.Unlock()
 	return w.write(data, true)
-}
-
-func min(a int, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 // Close method wrapper
@@ -388,8 +424,11 @@ func (w *commandWriter) Close() error {
 	if w.eof {
 		return io.ErrClosedPipe
 	}
+	if err := w.sendInput(nil, true); err != nil {
+		return err
+	}
 	w.eof = true
-	return w.sendInput(nil, w.eof)
+	return nil
 }
 
 // Read data from this Pipe

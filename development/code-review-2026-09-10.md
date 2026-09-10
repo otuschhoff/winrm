@@ -275,6 +275,8 @@ These phases are separate from historical feature phases in other documents. Pha
 
 **Dependencies:** B/C for propagation/cancellation; D is not required to start parser/Kerberos tasks. **Findings:** SOAP portion of R8, R10, R12.
 
+**Status:** complete on 2026-09-10 for the offline implementation and test scope. Evidence and the explicit live-interoperability limitation are recorded in [Phase E protocol semantics and input sizing](phase-e-implementation.md).
+
 | Task | Owning slice | Implementation and acceptance |
 | --- | --- | --- |
 | E1 | [response.go](../response.go), [command.go](../command.go), [kerberos_session.go](../kerberos_session.go) | Typed faults/required fields. Test permanent fault vs expected operation timeout, empty IDs, missing exit, unsupported action, wrong command identity where available, malicious selectors. No panic, silent exit 0, or permanent-fault loop. |

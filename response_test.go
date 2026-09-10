@@ -124,6 +124,50 @@ func (s *WinRMSuite) TestSlurpSingleOutputRejectsMalformedXML(c *C) {
 	c.Assert(err, NotNil)
 }
 
+func (s *WinRMSuite) TestResponseSemantics(c *C) {
+	emptyShellID := strings.Replace(createShellResponse,
+		"<rsp:ShellId>67A74734-DD32-4F10-89DE-49A060483810</rsp:ShellId>",
+		"<rsp:ShellId></rsp:ShellId>", 1)
+	_, err := ParseOpenShellResponse(emptyShellID)
+	c.Assert(err, ErrorMatches, ".*missing.*ShellId.*")
+
+	emptyCommandID := strings.Replace(executeCommandResponse,
+		"<rsp:CommandId>1A6DEE6B-EC68-4DD6-87E9-030C0048ECC4</rsp:CommandId>",
+		"<rsp:CommandId></rsp:CommandId>", 1)
+	_, err = ParseExecuteCommandResponse(emptyCommandID)
+	c.Assert(err, ErrorMatches, ".*missing.*CommandId.*")
+
+	missingExit := strings.Replace(doneCommandResponse,
+		"<rsp:ExitCode>123</rsp:ExitCode>", "", 1)
+	_, _, err = ParseSlurpOutputErrResponse(missingExit, io.Discard, io.Discard)
+	c.Assert(err, ErrorMatches, ".*missing.*ExitCode.*")
+
+	wrongAction := strings.Replace(outputResponse, "shell/ReceiveResponse", "shell/CommandResponse", 1)
+	_, _, err = ParseSlurpOutputErrResponse(wrongAction, io.Discard, io.Discard)
+	c.Assert(err, ErrorMatches, ".*unsupported action.*")
+}
+
+func (s *WinRMSuite) TestOutputResponseFaultClassification(c *C) {
+	_, _, err := ParseSlurpOutputErrResponse(operationTimeoutResponse, io.Discard, io.Discard)
+	c.Assert(err, NotNil)
+	var fault *SOAPFaultError
+	c.Assert(errors.As(err, &fault), Equals, true)
+	c.Assert(errors.Is(err, ErrOperationTimeout), Equals, true)
+	c.Assert(fault.WSManCode, Equals, "2150858793")
+
+	_, _, err = ParseSlurpOutputErrResponse(executeCommandResponseWithError, io.Discard, io.Discard)
+	c.Assert(err, NotNil)
+	c.Assert(errors.Is(err, ErrOperationTimeout), Equals, false)
+}
+
+func (s *WinRMSuite) TestOutputResponseValidatesCommandIdentityAndStream(c *C) {
+	_, _, err := parseSlurpOutputErrResponse(outputResponse, io.Discard, io.Discard, "OTHER-COMMAND")
+	c.Assert(err, ErrorMatches, ".*unexpected command ID.*")
+
+	_, _, err = ParseSlurpOutputResponse(outputResponse, io.Discard, "stdout' or @Name='stderr")
+	c.Assert(err, ErrorMatches, ".*unsupported stream.*")
+}
+
 func FuzzParseCommandResponses(f *testing.F) {
 	f.Add(createShellResponse)
 	f.Add(executeCommandResponseWithError)
@@ -140,7 +184,10 @@ func FuzzParseCommandResponses(f *testing.F) {
 func FuzzParseOutputResponses(f *testing.F) {
 	f.Add(outputResponse, "stdout")
 	f.Add(doneCommandResponse, "stderr")
+	f.Add(operationTimeoutResponse, "stdout")
+	f.Add(strings.Replace(doneCommandResponse, "<rsp:ExitCode>123</rsp:ExitCode>", "", 1), "stderr")
 	f.Add("<not-closed", "stdout")
+	f.Add(outputResponse, "stdout' or @Name='stderr")
 	f.Fuzz(func(t *testing.T, response, stream string) {
 		if len(response) > 1<<20 || len(stream) > 32 {
 			t.Skip()

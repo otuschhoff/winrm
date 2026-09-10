@@ -55,7 +55,7 @@ func TestKerberosEncryptedConcurrentCommandsReuseContext(t *testing.T) {
 			response = executeCommandResponse
 		case "receive":
 			receiveCount++
-			response = kerberosPhase4Receive([]byte(fmt.Sprintf("result-%d", receiveCount)), nil, true, 0)
+			response = kerberosPhase4Receive(fmt.Appendf(nil, "result-%d", receiveCount), nil, true, 0)
 		}
 		contentType, responseBody, sealErr := framer.seal([]byte(response), acceptor)
 		if sealErr != nil {
@@ -267,6 +267,7 @@ func kerberosPhase4Action(message string) string {
 }
 
 func kerberosPhase4Receive(stdout, stderr []byte, done bool, exitCode int) string {
+	const commandID = "1A6DEE6B-EC68-4DD6-87E9-030C0048ECC4"
 	state := "Running"
 	exit := ""
 	if done {
@@ -275,10 +276,10 @@ func kerberosPhase4Receive(stdout, stderr []byte, done bool, exitCode int) strin
 	}
 	stream := ""
 	if len(stdout) > 0 {
-		stream += `<rsp:Stream Name="stdout">` + base64.StdEncoding.EncodeToString(stdout) + `</rsp:Stream>`
+		stream += `<rsp:Stream Name="stdout" CommandId="` + commandID + `">` + base64.StdEncoding.EncodeToString(stdout) + `</rsp:Stream>`
 	}
 	if len(stderr) > 0 {
-		stream += `<rsp:Stream Name="stderr">` + base64.StdEncoding.EncodeToString(stderr) + `</rsp:Stream>`
+		stream += `<rsp:Stream Name="stderr" CommandId="` + commandID + `">` + base64.StdEncoding.EncodeToString(stderr) + `</rsp:Stream>`
 	}
-	return `<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:rsp="http://schemas.microsoft.com/wbem/wsman/1/windows/shell"><s:Body><rsp:ReceiveResponse>` + stream + `<rsp:CommandState State="http://schemas.microsoft.com/wbem/wsman/1/windows/shell/CommandState/` + state + `">` + exit + `</rsp:CommandState></rsp:ReceiveResponse></s:Body></s:Envelope>`
+	return `<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:a="http://schemas.xmlsoap.org/ws/2004/08/addressing" xmlns:rsp="http://schemas.microsoft.com/wbem/wsman/1/windows/shell"><s:Header><a:Action>http://schemas.microsoft.com/wbem/wsman/1/windows/shell/ReceiveResponse</a:Action></s:Header><s:Body><rsp:ReceiveResponse>` + stream + `<rsp:CommandState CommandId="` + commandID + `" State="http://schemas.microsoft.com/wbem/wsman/1/windows/shell/CommandState/` + state + `">` + exit + `</rsp:CommandState></rsp:ReceiveResponse></s:Body></s:Envelope>`
 }
