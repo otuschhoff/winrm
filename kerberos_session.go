@@ -304,6 +304,13 @@ func (session *kerberosSession) postEncryptedLocked(ctx context.Context, message
 	}
 	debugSOAPPayload("response", "encrypted", plaintext)
 	emitWinRMCaptureRecord(exchangeID, "response", "encrypted", "unencrypted_payload", plaintext, request, response.StatusCode, kerberosSOAPContentType, response.Header)
+	if response.StatusCode != http.StatusOK {
+		fault, faultErr := parseSOAPFaultResponse(string(plaintext))
+		if faultErr == nil {
+			return "", &KerberosError{Stage: "soap", StatusCode: response.StatusCode, Err: fault}
+		}
+		return "", &KerberosError{Stage: "http", StatusCode: response.StatusCode, Err: errors.New("WinRM request failed")}
+	}
 	return string(plaintext), nil
 }
 
@@ -417,6 +424,10 @@ func (session *kerberosSession) postPlaintextLocked(ctx context.Context, message
 		return "", &KerberosError{Stage: "http", StatusCode: response.StatusCode, Err: readErr}
 	}
 	if response.StatusCode != http.StatusOK {
+		fault, faultErr := parseSOAPFaultResponse(string(body))
+		if faultErr == nil {
+			return "", &KerberosError{Stage: "soap", StatusCode: response.StatusCode, Err: fault}
+		}
 		return "", &KerberosError{Stage: "http", StatusCode: response.StatusCode, Err: errors.New("WinRM request failed")}
 	}
 	mediaType, _, contentTypeErr := mime.ParseMediaType(response.Header.Get("Content-Type"))

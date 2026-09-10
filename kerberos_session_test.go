@@ -432,14 +432,12 @@ func TestKerberosSessionEncryptedResponseHandling(t *testing.T) {
 	t.Run("authenticated SOAP fault", func(t *testing.T) {
 		session, transport := newEncryptedFixtureSession(t, executeCommandResponseWithError)
 		transport.responseStatus = http.StatusInternalServerError
-		response, err := session.post(context.Background(), "<soap/>", 4096)
-		if err != nil {
-			t.Fatal(err)
-		}
-		_, parseErr := ParseExecuteCommandResponse(response)
-		var commandError *ExecuteCommandError
-		if !errors.As(parseErr, &commandError) || commandError.Body != executeCommandResponseWithError {
-			t.Fatalf("SOAP fault = %#v", parseErr)
+		_, err := session.post(context.Background(), "<soap/>", 4096)
+		var kerberosError *KerberosError
+		var fault *SOAPFaultError
+		if !errors.As(err, &kerberosError) || kerberosError.Stage != "soap" ||
+			!errors.As(err, &fault) || fault.WSManCode != "2147942606" {
+			t.Fatalf("SOAP fault = %#v", err)
 		}
 		if session.state != kerberosSessionEstablished || transport.calls != 2 {
 			t.Fatalf("fault state/calls = %d/%d", session.state, transport.calls)
@@ -471,6 +469,36 @@ func TestKerberosSessionEncryptedResponseHandling(t *testing.T) {
 				t.Fatalf("failure state/calls = %d/%d", session.state, transport.calls)
 			}
 		})
+	}
+}
+
+func TestKerberosEncryptedOperationTimeoutsRetryUntilCompletion(t *testing.T) {
+	session, transport := newEncryptedFixtureSession(t, "")
+	transport.responses = []string{
+		executeCommandResponse,
+		operationTimeoutResponse,
+		operationTimeoutResponse,
+		operationTimeoutResponse,
+		doneCommandResponse,
+	}
+	client := &Client{
+		Parameters: *DefaultParameters,
+		url:        "http://host.example.test/wsman",
+		http:       &ClientKerberos{session: session},
+	}
+	command, err := client.NewShell("SHELLID").Execute("hostname")
+	if err != nil {
+		t.Fatal(err)
+	}
+	command.Wait()
+	if err := command.Error(); err != nil {
+		t.Fatal(err)
+	}
+	if command.ExitCode() != 123 {
+		t.Fatalf("exit code = %d, want 123", command.ExitCode())
+	}
+	if transport.calls != 6 {
+		t.Fatalf("encrypted HTTP calls = %d, want 6", transport.calls)
 	}
 }
 
@@ -731,6 +759,7 @@ type encryptedKerberosTransport struct {
 	responseConnection net.Conn
 	serverAdapter      *kerberosGSSAdapter
 	response           string
+	responses          []string
 	responseStatus     int
 	request            string
 	calls              int
@@ -770,11 +799,19 @@ func (transport *encryptedKerberosTransport) RoundTrip(request *http.Request) (*
 	if status == 0 {
 		status = http.StatusOK
 	}
+	responseBody := transport.response
+	if len(transport.responses) > 0 {
+		responseIndex := transport.calls - 2
+		if responseIndex >= len(transport.responses) {
+			return nil, errors.New("unexpected encrypted Kerberos request")
+		}
+		responseBody = transport.responses[responseIndex]
+	}
 	if transport.plaintext {
 		header := make(http.Header)
 		header.Set("Content-Type", soapXML)
 		return &http.Response{
-			StatusCode: status, Header: header, Body: io.NopCloser(strings.NewReader(transport.response)), Request: request,
+			StatusCode: status, Header: header, Body: io.NopCloser(strings.NewReader(responseBody)), Request: request,
 		}, nil
 	}
 	if transport.oversized {
@@ -783,7 +820,7 @@ func (transport *encryptedKerberosTransport) RoundTrip(request *http.Request) (*
 			Body: io.NopCloser(strings.NewReader(strings.Repeat("x", 1024+kerberosMaxWrapOverhead+kerberosMaxMetadataSize+1))), Request: request,
 		}, nil
 	}
-	contentType, responseBody, err := framer.seal([]byte(transport.response), transport.serverAdapter)
+	contentType, sealedResponse, err := framer.seal([]byte(responseBody), transport.serverAdapter)
 	if err != nil {
 		return nil, err
 	}
@@ -791,10 +828,10 @@ func (transport *encryptedKerberosTransport) RoundTrip(request *http.Request) (*
 	header.Set("Content-Type", contentType)
 	if transport.tamper {
 		terminalLength := len("--" + kerberosMultipartBoundary + "--\r\n")
-		responseBody[len(responseBody)-terminalLength-1] ^= 0xff
+		sealedResponse[len(sealedResponse)-terminalLength-1] ^= 0xff
 	}
 	return &http.Response{
-		StatusCode: status, Header: header, Body: io.NopCloser(strings.NewReader(string(responseBody))), Request: request,
+		StatusCode: status, Header: header, Body: io.NopCloser(strings.NewReader(string(sealedResponse))), Request: request,
 	}, nil
 }
 

@@ -94,7 +94,7 @@ func encryptedLifecycleResponse(request string) (string, string) {
 	case strings.Contains(request, "shell/Command"):
 		return "command", executeCommandResponse
 	case strings.Contains(request, "shell/Receive"):
-		return "receive", `<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope" xmlns:rsp="http://schemas.microsoft.com/wbem/wsman/1/windows/shell"><s:Body><rsp:ReceiveResponse><rsp:Stream Name="stdout">aG9zdC5leGFtcGxlLnRlc3QK</rsp:Stream><rsp:CommandState State="http://schemas.microsoft.com/wbem/wsman/1/windows/shell/CommandState/Done"><rsp:ExitCode>0</rsp:ExitCode></rsp:CommandState></rsp:ReceiveResponse></s:Body></s:Envelope>`
+		return "receive", kerberosPhase4Receive([]byte("host.example.test\n"), nil, true, 0)
 	case strings.Contains(request, "shell/Signal"):
 		return "signal", `<s:Envelope xmlns:s="http://www.w3.org/2003/05/soap-envelope"/>`
 	case strings.Contains(request, "transfer/Delete"):
