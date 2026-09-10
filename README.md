@@ -153,6 +153,16 @@ if err != nil {
 
 ```
 
+The legacy `Encryption` decorator supports NTLM message encryption only. It
+fails closed: an authentication/bootstrap error does not retry the SOAP request
+through an unencrypted transport, and an encrypted exchange rejects plaintext
+responses. This compatibility transport does not yet provide the response-size,
+malformed-framing, context-cancellation, custom routing/TLS, or concurrent-use
+guarantees of the native Kerberos transport. Do not share one `Encryption`
+instance across concurrent requests. Prefer certificate-verified HTTPS with
+`ClientNTLM`, or the native Kerberos transport when message encryption over HTTP
+is required.
+
 Passing a TransportDecorator also permit to use Kerberos authentication
 
 ```go
@@ -235,6 +245,30 @@ mutual SPNEGO authentication and AES RFC 4121 message protection. It does not
 provide credential delegation, channel binding, automatic authentication-mode
 fallback, or RC4 GSS message protection. Python and system Kerberos tools are
 used only by opt-in comparison tests, not by production code.
+
+### Diagnostic output safety
+
+`SetHTTPDebug(true)` logs HTTP metadata to stderr. By default, credential,
+cookie, token, secret, and API-key headers are replaced with `[REDACTED]`;
+plaintext bodies are represented only by their byte count, and encrypted WinRM
+bodies are summarized. `SetHTTPDebugUnsafe(true)` includes raw headers and
+printable plaintext bodies. Unsafe HTTP debug is process-wide and must be
+disabled after use.
+
+The environment diagnostics use these controls:
+
+| Variable | Behavior |
+| --- | --- |
+| `OPSCTL_DEBUG_WINRM_SOAP` | Log redacted SOAP payload metadata to stderr. |
+| `OPSCTL_DEBUG_WINRM_CAPTURE` | Write redacted JSONL capture records to stderr. |
+| `OPSCTL_DEBUG_WINRM_CAPTURE_FILE` | Append redacted JSONL records to this file. New and existing files are forced to mode `0600` where Unix permission bits are supported. |
+| `OPSCTL_DEBUG_WINRM_UNSAFE=1` | Include raw headers and payloads in all enabled diagnostics. `true` is also accepted. |
+
+Safe JSONL records retain byte counts, protocol metadata, and parsed GSS header
+details, but omit `body_base64` and `body_text`. Unsafe output can contain
+password-derived authorization values, Kerberos/NTLM tokens, commands, stdin,
+stdout, and stderr. Restrict access, retention, and transfer of these files; do
+not attach unsafe captures to public issues or CI artifacts.
 
 ### Kerberos integration comparison
 

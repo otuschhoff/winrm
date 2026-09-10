@@ -1,13 +1,46 @@
 package winrm
 
 import (
-	"net/http"
-
+	"encoding/base64"
+	"encoding/binary"
 	"net"
+	"net/http"
+	"testing"
 	"time"
 
 	. "gopkg.in/check.v1"
 )
+
+func TestNTLMMalformedChallengeReturnsError(t *testing.T) {
+	challenge := make([]byte, 48)
+	copy(challenge, []byte("NTLMSSP\x00"))
+	binary.LittleEndian.PutUint32(challenge[8:12], 2)
+	binary.LittleEndian.PutUint16(challenge[12:14], 8)
+	binary.LittleEndian.PutUint16(challenge[14:16], 8)
+	binary.LittleEndian.PutUint32(challenge[16:20], ^uint32(3))
+
+	server, host, port, err := StartTestServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		response.Header().Set("WWW-Authenticate", "NTLM "+base64.StdEncoding.EncodeToString(challenge))
+		response.WriteHeader(http.StatusUnauthorized)
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer server.Close()
+
+	endpoint := NewEndpoint(host, port, false, false, nil, nil, nil, 0)
+	parameters := *DefaultParameters
+	parameters.TransportDecorator = func() Transporter { return &ClientNTLM{} }
+	client, err := NewClientWithParameters(endpoint, "test", "test", &parameters)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	if _, err := client.CreateShell(); err == nil {
+		t.Fatal("malformed NTLM challenge unexpectedly succeeded")
+	}
+}
 
 func (s *WinRMSuite) TestHttpNTLMRequest(c *C) {
 	ts, host, port, err := StartTestServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
