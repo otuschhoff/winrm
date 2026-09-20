@@ -220,7 +220,7 @@ func isAESKerberosEnctype(keyType int32) bool {
 }
 
 func validateAESOnlyCCache(cache *credentials.CCache) error {
-	for _, credential := range cache.Credentials {
+	for _, credential := range cache.GetEntries() {
 		if credential == nil || !isAESKerberosEnctype(credential.Key.KeyType) {
 			if credential == nil {
 				return errors.New("ccache contains an invalid credential")
