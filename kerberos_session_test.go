@@ -127,6 +127,12 @@ func TestAESOnlyKerberosCredentialKeys(t *testing.T) {
 	if err := validateAESOnlyCCache(cache); err != nil {
 		t.Fatalf("AES ccache validation: %v", err)
 	}
+	if err := cache.SetConfig("pa_type", "krbtgt/EXAMPLE.TEST@EXAMPLE.TEST", "2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateAESOnlyCCache(cache); err != nil {
+		t.Fatalf("AES ccache with metadata validation: %v", err)
+	}
 
 	entries := []keytab.Entry{
 		{Key: types.EncryptionKey{KeyType: 17}},
