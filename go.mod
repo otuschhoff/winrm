@@ -10,6 +10,7 @@ require (
 	github.com/kr/pretty v0.1.0 // indirect
 	github.com/masterzen/simplexml v0.0.0-20190410153822-31eea3082786
 	github.com/otuschhoff/gokrb5/v8 v8.5.3
+	golang.org/x/term v0.45.0
 	golang.org/x/text v0.41.0
 	gopkg.in/check.v1 v1.0.0-20180628173108-788fd7840127
 )
@@ -25,4 +26,5 @@ require (
 	github.com/kr/text v0.1.0 // indirect
 	golang.org/x/crypto v0.56.0 // indirect
 	golang.org/x/net v0.58.0 // indirect
+	golang.org/x/sys v0.47.0 // indirect
 )

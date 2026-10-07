@@ -87,11 +87,43 @@ go build -o bin/winrm ./cmd/winrm
 Connect to a persistent `cmd.exe` session using Kerberos:
 
 ```sh
-bin/winrm -host win-host-47.example.com -user alex.rivera -password-file /path/to/alex.rivera.password
+bin/winrm alex.rivera@win-host-47.example.com
 ```
 
-The password file contains only the password, optionally followed by a newline;
-restrict its permissions to your user. Alternatively set `WINRM_PASSWORD`.
+The interface follows SSH where WinRM permits:
+
+```sh
+winrm [options] [user@]host [command [argument ...]]
+winrm -l alex.rivera -p 5985 win-host-47.example.com
+winrm alex.rivera@win-host-47.example.com whoami
+```
+
+Options must precede the destination; everything after it is a remote command,
+joined with spaces as SSH does, so quote remote shell expressions appropriately.
+Without a command, the client starts a persistent shell. Without an explicit
+username, it uses the local login name (unless using `-ccache`). `-l` overrides
+the username in the destination. Attached arguments such as `-p5985` and
+`-lalex.rivera`, and short-option groups such as `-Tp5985`, are also accepted.
+Use `-l alex.rivera@EXAMPLE.COM host` or
+`alex.rivera@EXAMPLE.COM@host` for an explicit Kerberos principal.
+Bracketed IPv6 destinations such as `alex.rivera@[::1]` are supported.
+
+`-T` is accepted for compatibility: WinRM always operates without a PTY.
+`-t`/`-tt` are rejected rather than pretending to allocate one. SSH port
+forwarding, key-file authentication (`-i`), SSH config files, and SSH `-o`
+options are not implemented. WinRM-specific transport and credential flags
+remain available. Existing `-host`, `-user`, `-port`, and `-command` flags still
+work; `-user` and `-port` are aliases for `-l` and `-p`. Do not combine
+`-host` with a positional destination, or `-command` with a positional command.
+
+When no password is supplied, the client prompts on stderr and reads a password
+from terminal stdin without echoing it. Alternatively set `WINRM_PASSWORD` or use
+`-password-file /path/to/alex.rivera.password`. The password file takes precedence
+over the environment variable and contains only the password, optionally followed
+by a newline; restrict its permissions to your user. An empty password also
+triggers the prompt, but a missing or unreadable password file is an error.
+Piped or redirected stdin is never consumed by the prompt: noninteractive runs
+must supply a password or use a ticket cache. Empty prompted passwords are rejected.
 Passwords are never accepted as command-line arguments. The realm defaults to
 the realm in `user@REALM` or `default_realm` in `/etc/krb5.conf`; override it with
 `-realm` and the configuration path with `-krb-config`. Use the host's FQDN when
@@ -105,11 +137,12 @@ and LF line endings are converted to CRLF. Stdin EOF is forwarded to the server.
 Output and stderr are streamed concurrently with input.
 
 Use `-shell powershell` for a persistent PowerShell process (stdin command mode,
-without an interactive prompt), or `-command "whoami"` to run a single command.
+without an interactive prompt), or append `whoami` after the destination to run
+a single command.
 For example, a noninteractive check using the same persistent shell is:
 
 ```sh
-printf 'hostname\nwhoami\nexit\n' | bin/winrm -host win-host-47.example.com -user alex.rivera -password-file /path/to/alex.rivera.password
+printf 'hostname\nwhoami\nexit\n' | bin/winrm -password-file /path/to/alex.rivera.password alex.rivera@win-host-47.example.com
 ```
 
 WinRM/WinRS does not provide an SSH-style PTY: this is a line-oriented shell,
@@ -121,7 +154,7 @@ return nonzero and Ctrl+C returns 130.
 Kerberos over HTTP (default port 5985) uses message encryption. `-https` selects
 certificate-verified TLS and port 5986; `-ca` supplies a private PEM CA.
 Local-account Basic authentication requires `-auth basic -https`. No plaintext
-Basic or certificate-verification bypass is offered. `-port` overrides the port,
+Basic or certificate-verification bypass is offered. `-p` overrides the port,
 and `-timeout` sets the per-request timeout, not the lifetime of the session.
 Run `bin/winrm -help` for all options.
 

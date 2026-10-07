@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"io"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -31,7 +33,7 @@ func TestParseOptions(t *testing.T) {
 		})
 	}
 	for _, args := range [][]string{
-		{}, {"-host", "windows"}, {"-host", "http://windows", "-user", "alice"},
+		{}, {"-host", "http://windows", "-user", "alice"},
 		{"-host", "windows", "-user", "alice", "-auth", "basic"},
 		{"-host", "windows", "-user", "alice", "-shell", "bash"},
 		{"-host", "windows", "-user", "alice", "-port", "65536"},
@@ -45,15 +47,133 @@ func TestParseOptions(t *testing.T) {
 	}
 }
 
+func TestSSHOptions(t *testing.T) {
+	for _, tt := range []struct {
+		name, host, login, command string
+		args                       []string
+		port                       int
+	}{
+		{"destination", "windows.example.com", "alice", "", []string{"alice@windows.example.com"}, 5985},
+		{"login flag", "windows", "alice", "", []string{"-l", "alice", "windows"}, 5985},
+		{"explicit login wins", "windows", "alice", "", []string{"-l", "alice", "bob@windows"}, 5985},
+		{"port flag", "windows", "alice", "", []string{"-p", "1234", "alice@windows"}, 1234},
+		{"attached flags", "windows", "alice", "", []string{"-p1234", "-lalice", "windows"}, 1234},
+		{"grouped flags", "windows", "alice", "", []string{"-Tp1234", "-lalice", "windows"}, 1234},
+		{"no tty", "windows", "alice", "", []string{"-T", "alice@windows"}, 5985},
+		{"remote command", "windows", "alice", "cmd /c echo hello", []string{"alice@windows", "cmd", "/c", "echo", "hello"}, 5985},
+		{"remote flags untouched", "windows", "alice", "tool -p123 -lremote -T", []string{"alice@windows", "tool", "-p123", "-lremote", "-T"}, 5985},
+		{"principal login", "windows", "alice@EXAMPLE.COM", "", []string{"alice@EXAMPLE.COM@windows"}, 5985},
+		{"IPv6", "::1", "alice", "", []string{"alice@[::1]"}, 5985},
+		{"legacy mixed", "windows", "alice", "whoami", []string{"-user", "alice", "-command", "whoami", "windows"}, 5985},
+		{"end options", "windows", "alice", "", []string{"--", "alice@windows"}, 5985},
+		{"https", "windows", "alice", "", []string{"-https", "alice@windows"}, 5986},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			o, err := parseOptions(tt.args, io.Discard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if o.host != tt.host || o.user != tt.login || o.command != tt.command || o.port != tt.port {
+				t.Fatalf("unexpected options: host=%q user=%q command=%q port=%d", o.host, o.user, o.command, o.port)
+			}
+		})
+	}
+	for _, args := range [][]string{
+		{"-t", "alice@windows"}, {"-tt", "alice@windows"},
+		{"-host", "windows", "alice@another"},
+		{"-command", "whoami", "alice@windows", "hostname"},
+		{"alice@"}, {"@windows"}, {"-pnot-a-port", "windows"},
+		{"-L", "8080:localhost:80", "windows"},
+		{"-l"}, {"-p"},
+		{"alice@[::1"}, {"alice@::1]"}, {"alice@[windows]"},
+	} {
+		if _, err := parseOptions(args, io.Discard); err == nil {
+			t.Fatalf("expected rejection: %v", args)
+		}
+	}
+	o, err := parseOptions([]string{"windows"}, io.Discard)
+	if err != nil || o.user == "" {
+		t.Fatalf("local username default: user=%q err=%v", o.user, err)
+	}
+	var help bytes.Buffer
+	if code, err := run(context.Background(), []string{"-h"}, io.NopCloser(strings.NewReader("")), io.Discard, &help); code != 0 || err != nil {
+		t.Fatalf("help failed: code=%d err=%v", code, err)
+	}
+	if !strings.Contains(help.String(), "[user@]host [command") {
+		t.Fatal("help does not describe SSH-style syntax")
+	}
+}
+
 func TestHelpAndMissingPassword(t *testing.T) {
 	code, err := run(context.Background(), []string{"-help"}, io.NopCloser(strings.NewReader("")), io.Discard, io.Discard)
 	if code != 0 || err != nil {
 		t.Fatalf("help: code %d, err %v", code, err)
 	}
 	t.Setenv("WINRM_PASSWORD", "")
-	_, err = newClient(options{user: "alice"})
+	_, err = newClient(options{user: "alice"}, func() (string, error) {
+		return promptPassword(context.Background(), io.NopCloser(strings.NewReader("")), io.Discard)
+	})
 	if err == nil || !strings.Contains(err.Error(), "password") {
 		t.Fatalf("missing password: %v", err)
+	}
+}
+
+func TestResolvePassword(t *testing.T) {
+	dir := t.TempDir()
+	passwordFile := filepath.Join(dir, "sample.password")
+	if err := os.WriteFile(passwordFile, []byte(" file secret \r\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	emptyFile := filepath.Join(dir, "empty.password")
+	if err := os.WriteFile(emptyFile, []byte("\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	sentinel := errors.New("prompt failed")
+	for _, tt := range []struct {
+		name, env, prompted, want string
+		options                   options
+		promptErr                 error
+		wantPrompt, wantErr       bool
+	}{
+		{name: "prompt", prompted: " secret ", want: " secret ", wantPrompt: true},
+		{name: "environment", env: "env secret", want: "env secret"},
+		{name: "file precedence", env: "env secret", options: options{passwordFile: passwordFile}, want: " file secret "},
+		{name: "empty file", env: "env secret", options: options{passwordFile: emptyFile}, prompted: "prompt secret", want: "prompt secret", wantPrompt: true},
+		{name: "unreadable file", options: options{passwordFile: dir}, wantErr: true},
+		{name: "cache", env: "env secret", options: options{ccache: "cache"}},
+		{name: "empty prompt", wantPrompt: true, wantErr: true},
+		{name: "prompt error", promptErr: sentinel, wantPrompt: true, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("WINRM_PASSWORD", tt.env)
+			called := false
+			password, err := resolvePassword(tt.options, func() (string, error) {
+				called = true
+				return tt.prompted, tt.promptErr
+			})
+			if password != tt.want || (err != nil) != tt.wantErr || called != tt.wantPrompt {
+				t.Fatalf("password match=%v err=%v prompted=%v", password == tt.want, err, called)
+			}
+			if tt.promptErr != nil && !errors.Is(err, tt.promptErr) {
+				t.Fatal("prompt error lost")
+			}
+		})
+	}
+}
+
+func TestPasswordPromptDoesNotConsumePipe(t *testing.T) {
+	input := strings.NewReader("remote command\n")
+	_, err := promptPassword(context.Background(), io.NopCloser(input), io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "terminal stdin") {
+		t.Fatalf("nonterminal prompt error: %v", err)
+	}
+	if input.Len() != len("remote command\n") {
+		t.Fatal("prompt consumed remote command input")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := promptPassword(ctx, io.NopCloser(input), io.Discard); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled prompt: %v", err)
 	}
 }
 
