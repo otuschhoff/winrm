@@ -110,6 +110,12 @@ func TestReadSOAPResponseSemantics(t *testing.T) {
 			if test.wantError == "" && err != nil || test.wantError != "" && (err == nil || !strings.Contains(err.Error(), test.wantError)) {
 				t.Fatalf("error = %v, want substring %q", err, test.wantError)
 			}
+			if err != nil {
+				var status interface{ HTTPStatusCode() int }
+				if !errors.As(err, &status) || status.HTTPStatusCode() != test.status {
+					t.Fatalf("error does not expose HTTP status %d: %v", test.status, err)
+				}
+			}
 			if body.closeCount != 1 {
 				t.Fatalf("close count = %d, want 1", body.closeCount)
 			}

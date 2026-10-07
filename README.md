@@ -184,13 +184,23 @@ It also accepts `WINRM_PASSWORD`, `WINRM_KRB_REALM`, and `WINRM_KRB_CONFIG`.
 
 ### Connection errors
 
-The CLI keeps connection context but summarizes recognized credential and access
-errors, for example:
+Every CLI failure is written to stderr as a plain-language summary with a
+suggested next step, followed by a `Details:` block containing the original
+diagnostic and operation context. For example:
 
 ```text
 winrm: connect to windows.example.com: authentication failed: Kerberos rejected your credentials. Check username, password, and realm (KDC_ERR_PREAUTH_FAILED).
+  Details: connect to windows.example.com: Kerberos negotiate failed: KRB Error: (24) KDC_ERR_PREAUTH_FAILED Pre-authentication information was invalid
 winrm: connect to windows.example.com: authorization failed: authentication succeeded, but Windows denied WinRM access (ERROR_ACCESS_DENIED, code 5). Ask an administrator to check WinRM permissions.
+  Details: connect to windows.example.com: Kerberos soap failed with HTTP status 500: WS-Management fault 5: unknown fault
 ```
+
+DNS, refused connections, timeouts, certificate failures, credential-file errors,
+missing interactive input, and Kerberos configuration or message-protection
+failures also receive actionable summaries. Unknown failures use an
+operation-specific summary without inventing a cause; the original error remains
+in `Details`. Details can contain hostnames and local paths, so redact these
+before sharing diagnostic output.
 
 Kerberos pre-authentication failure is an **authentication** error, commonly an
 incorrect password, not proof of missing WinRM permissions. Unknown accounts,
@@ -203,8 +213,22 @@ the requested operation: this is **authorization**, even when HTTP status is
 For shell creation, ask an administrator to check the account's WinRM shell
 access, endpoint ACLs, group membership, and applicable policies. HTTP 500 alone
 does not establish an authorization failure; other faults and unclassified
-errors retain their original diagnostics. Library errors and error chains are
-unchanged.
+errors retain their original diagnostics in `Details`. Cleanup and streaming
+failures are reported separately with their operation names; identical reports
+are deduplicated, but distinct failures are not dropped. An expected stdin read
+interruption during shutdown is ignored, not an unrelated input or cleanup error.
+
+A nonzero remote exit status is reported with its original code and a reminder
+to inspect the remote output; it is not presented as a connection failure.
+Successful commands and `-help` produce no error report. Invalid options return
+2 with a usage hint instead of dumping the full option list, local errors return
+nonzero, and Ctrl+C returns 130 with a cancellation summary. Remote exit-code
+propagation is otherwise unchanged.
+
+The CLI preserves error chains. HTTP response errors expose an
+`HTTPStatusCode() int` method so callers can classify Basic-authentication and
+invalid-content-type responses without inspecting error strings or accessing
+potentially sensitive response bodies; existing library error text is preserved.
 
 ## Library Usage
 

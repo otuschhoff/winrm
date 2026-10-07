@@ -11,6 +11,11 @@ import (
 	"golang.org/x/term"
 )
 
+var (
+	errPasswordPromptUnavailable = errors.New("password prompt requires terminal stdin; provide -password-file or WINRM_PASSWORD, or use -ccache")
+	errEmptyPassword             = errors.New("password must not be empty")
+)
+
 func resolvePassword(o options, prompt func() (string, error)) (string, error) {
 	if o.ccache != "" {
 		return "", nil
@@ -19,7 +24,7 @@ func resolvePassword(o options, prompt func() (string, error)) (string, error) {
 	if o.passwordFile != "" {
 		data, err := os.ReadFile(o.passwordFile)
 		if err != nil {
-			return "", fmt.Errorf("read password file: %w", err)
+			return "", withOperation("read password file", "Could not read the password file. Check the -password-file path and file permissions.", err)
 		}
 		password = strings.TrimSuffix(strings.TrimSuffix(string(data), "\n"), "\r")
 	}
@@ -27,10 +32,10 @@ func resolvePassword(o options, prompt func() (string, error)) (string, error) {
 		var err error
 		password, err = prompt()
 		if err != nil {
-			return "", fmt.Errorf("read password: %w", err)
+			return "", withOperation("read password", "Could not read a password. Check terminal input or supply -password-file, WINRM_PASSWORD, or -ccache.", err)
 		}
 		if password == "" {
-			return "", errors.New("password must not be empty")
+			return "", errEmptyPassword
 		}
 	}
 	return password, nil
@@ -42,7 +47,7 @@ func promptPassword(ctx context.Context, stdin io.ReadCloser, stderr io.Writer) 
 	}
 	input, ok := stdin.(*os.File)
 	if !ok || !term.IsTerminal(int(input.Fd())) {
-		return "", errors.New("password prompt requires terminal stdin; provide -password-file or WINRM_PASSWORD, or use -ccache")
+		return "", errPasswordPromptUnavailable
 	}
 	fd := int(input.Fd())
 	state, err := term.GetState(fd)

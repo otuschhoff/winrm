@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"flag"
@@ -30,11 +31,12 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 	var o options
 	var requestTTY, disableTTY bool
 	flags := flag.NewFlagSet("winrm", flag.ContinueOnError)
-	flags.SetOutput(stderr)
+	var parseOutput bytes.Buffer
+	flags.SetOutput(&parseOutput)
 	flags.Usage = func() {
-		fmt.Fprintln(stderr, "Usage: winrm [options] [user@]host [command [argument ...]]")
-		fmt.Fprintln(stderr, "       winrm [options] -host host [-command command]")
-		fmt.Fprintln(stderr, "\nOptions must precede the destination. WinRM does not provide a PTY or port forwarding.")
+		fmt.Fprintln(flags.Output(), "Usage: winrm [options] [user@]host [command [argument ...]]")
+		fmt.Fprintln(flags.Output(), "       winrm [options] -host host [-command command]")
+		fmt.Fprintln(flags.Output(), "\nOptions must precede the destination. WinRM does not provide a PTY or port forwarding.")
 		flags.PrintDefaults()
 	}
 	flags.StringVar(&o.host, "host", "", "destination hostname (legacy alternative to [user@]host)")
@@ -70,6 +72,11 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 	flags.BoolVar(&o.https, "https", false, "use certificate-verified HTTPS")
 	flags.DurationVar(&o.timeout, "timeout", 90*time.Second, "timeout per HTTP request (not total session duration)")
 	if err := flags.Parse(normalizeSSHFlags(args, flags)); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			if _, writeErr := io.Copy(stderr, &parseOutput); writeErr != nil {
+				return o, withOperation("write help", "Could not display help. Check the stderr output destination.", writeErr)
+			}
+		}
 		return o, err
 	}
 	if requestTTY {
@@ -220,22 +227,22 @@ func newClient(o options, prompt func() (string, error)) (*winrm.Client, error) 
 		username, realm, found := strings.Cut(o.user, "@")
 		if found {
 			if username == "" || realm == "" || strings.Contains(realm, "@") {
-				return nil, errors.New("invalid user@REALM principal")
+				return nil, withOperation("configure Kerberos", "The Kerberos username is invalid. Use user@REALM with -l, or user@REALM@host as the destination.", errors.New("invalid user@REALM principal"))
 			}
 			if o.realm != "" && !strings.EqualFold(realm, o.realm) {
-				return nil, errors.New("username realm does not match -realm")
+				return nil, withOperation("configure Kerberos", "The username realm and -realm do not match. Use the same Kerberos realm for both.", errors.New("username realm does not match -realm"))
 			}
 			o.realm = realm
 		}
 		cfg, err := config.Load(o.krbConfig)
 		if err != nil {
-			return nil, fmt.Errorf("load Kerberos configuration: %w", err)
+			return nil, withOperation("load Kerberos configuration", "Could not load the Kerberos configuration. Check the -krb-config path, file permissions, and syntax.", err)
 		}
 		if o.realm == "" {
 			o.realm = cfg.LibDefaults.DefaultRealm
 		}
 		if o.realm == "" && o.ccache == "" {
-			return nil, errors.New("provide -realm or configure default_realm in krb5.conf")
+			return nil, withOperation("configure Kerberos", "The Kerberos realm is missing. Supply -realm or configure default_realm in krb5.conf.", errors.New("provide -realm or configure default_realm in krb5.conf"))
 		}
 		params.TransportDecorator = func() winrm.Transporter {
 			return &winrm.ClientKerberos{
@@ -245,7 +252,8 @@ func newClient(o options, prompt func() (string, error)) (*winrm.Client, error) 
 			}
 		}
 	}
-	return winrm.NewClientWithParameters(endpoint, o.user, password, &params)
+	client, err := winrm.NewClientWithParameters(endpoint, o.user, password, &params)
+	return client, withOperation("initialize WinRM transport", "Could not initialize the WinRM transport. Check the TLS certificates or Kerberos configuration in Details.", err)
 }
 
 func shellCommand(o options) string {
@@ -267,23 +275,31 @@ func run(ctx context.Context, args []string, stdin io.ReadCloser, stdout, stderr
 		return 0, nil
 	}
 	if err != nil {
-		return 2, err
+		var operation *operationError
+		if errors.As(err, &operation) && operation.operation == "write help" {
+			return 1, err
+		}
+		return 2, withOperation("parse options", "Invalid command-line options. Run winrm -help for usage.", err)
 	}
 	client, err := newClient(o, func() (string, error) {
 		return promptPassword(ctx, stdin, stderr)
 	})
 	if err != nil {
-		return 1, err
+		return 1, withOperation("configure client", "Could not configure the client. Check the authentication, credentials, and TLS or Kerberos settings in Details.", err)
 	}
-	defer func() { resultErr = errors.Join(resultErr, client.Close()) }()
+	defer func() {
+		resultErr = errors.Join(resultErr, withOperation("close client", "Client cleanup failed. The remote session may need administrator attention.", client.Close()))
+	}()
 	shell, err := client.CreateShellWithContext(ctx)
 	if err != nil {
-		return 1, fmt.Errorf("connect to %s: %w", o.host, err)
+		return 1, withOperation("connect to "+o.host, "Could not open a remote shell on "+o.host+". Check the WinRM listener and access settings; see Details.", err)
 	}
-	defer func() { resultErr = errors.Join(resultErr, shell.Close()) }()
+	defer func() {
+		resultErr = errors.Join(resultErr, withOperation("delete remote shell", "Could not delete the remote shell. Ask an administrator to check for a leftover WinRM session.", shell.Close()))
+	}()
 	cmd, err := shell.ExecuteWithContext(ctx, shellCommand(o))
 	if err != nil {
-		return 1, fmt.Errorf("start remote command: %w", err)
+		return 1, withOperation("start remote command", "Could not start the remote process. Check the command, shell executable, and server restrictions in Details.", err)
 	}
 	code, err = streamCommand(ctx, cmd, stdin, stdout, stderr)
 	return code, err
@@ -293,17 +309,28 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer cancel()
 	code, err := run(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr)
+	os.Exit(reportResult(ctx, code, err, os.Stderr))
+}
+
+func reportResult(ctx context.Context, code int, err error, stderr io.Writer) int {
+	if err == nil {
+		if ctx.Err() != nil {
+			err = ctx.Err()
+		} else if code != 0 {
+			err = &remoteExitError{code: code}
+		}
+	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "winrm:", formatCLIError(err))
+		fmt.Fprintln(stderr, "winrm:", formatCLIError(err))
 		if code == 0 {
 			code = 1
 		}
 	}
 	if ctx.Err() != nil {
-		code = 130
+		return 130
 	}
 	if code < 0 || code > 255 {
-		code = 1
+		return 1
 	}
-	os.Exit(code)
+	return code
 }

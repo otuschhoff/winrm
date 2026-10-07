@@ -28,6 +28,22 @@ func (responseError *httpResponseError) Error() string {
 	return fmt.Sprintf("HTTP response status %d", responseError.statusCode)
 }
 
+// HTTPStatusCode exposes the status without exposing the response body.
+func (responseError *httpResponseError) HTTPStatusCode() int {
+	return responseError.statusCode
+}
+
+type httpContentTypeError struct {
+	statusCode  int
+	contentType string
+}
+
+func (e *httpContentTypeError) Error() string {
+	return fmt.Sprintf("HTTP response status %d has invalid SOAP content type %q", e.statusCode, e.contentType)
+}
+
+func (e *httpContentTypeError) HTTPStatusCode() int { return e.statusCode }
+
 func readSOAPResponse(response *http.Response, maxBodySize int) (result string, err error) {
 	if response == nil || response.Body == nil {
 		return "", errors.New("HTTP response body is missing")
@@ -42,7 +58,7 @@ func readSOAPResponse(response *http.Response, maxBodySize int) (result string, 
 	contentType := response.Header.Get("Content-Type")
 	mediaType, _, mediaTypeErr := mime.ParseMediaType(contentType)
 	if mediaTypeErr != nil || !strings.EqualFold(mediaType, soapXML) {
-		return "", fmt.Errorf("HTTP response status %d has invalid SOAP content type %q", response.StatusCode, contentType)
+		return "", &httpContentTypeError{statusCode: response.StatusCode, contentType: contentType}
 	}
 
 	body, readErr := readBoundedResponseBody(response.Body, maxBodySize)
