@@ -182,6 +182,30 @@ WINRM_CLI_INTEGRATION=1 WINRM_HOST=win-host-47.example.com \
 
 It also accepts `WINRM_PASSWORD`, `WINRM_KRB_REALM`, and `WINRM_KRB_CONFIG`.
 
+### Connection errors
+
+The CLI keeps connection context but summarizes recognized credential and access
+errors, for example:
+
+```text
+winrm: connect to windows.example.com: authentication failed: Kerberos rejected your credentials. Check username, password, and realm (KDC_ERR_PREAUTH_FAILED).
+winrm: connect to windows.example.com: authorization failed: authentication succeeded, but Windows denied WinRM access (ERROR_ACCESS_DENIED, code 5). Ask an administrator to check WinRM permissions.
+```
+
+Kerberos pre-authentication failure is an **authentication** error, commonly an
+incorrect password, not proof of missing WinRM permissions. Unknown accounts,
+expired passwords, and revoked accounts have distinct messages.
+
+WS-Management fault **5** is Windows `ERROR_ACCESS_DENIED`. When returned as a
+Kerberos SOAP fault, authentication has already succeeded and the server denied
+the requested operation: this is **authorization**, even when HTTP status is
+500. The code alone cannot identify the exact permission or policy responsible.
+For shell creation, ask an administrator to check the account's WinRM shell
+access, endpoint ACLs, group membership, and applicable policies. HTTP 500 alone
+does not establish an authorization failure; other faults and unclassified
+errors retain their original diagnostics. Library errors and error chains are
+unchanged.
+
 ## Library Usage
 
 **Warning the API might be subject to change.**

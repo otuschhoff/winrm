@@ -294,7 +294,7 @@ func main() {
 	defer cancel()
 	code, err := run(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr)
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "winrm:", err)
+		fmt.Fprintln(os.Stderr, "winrm:", formatCLIError(err))
 		if code == 0 {
 			code = 1
 		}
