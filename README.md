@@ -87,7 +87,7 @@ go build -o bin/winrm ./cmd/winrm
 Connect to a persistent `cmd.exe` session using Kerberos:
 
 ```sh
-bin/winrm -host win-host-47.example.com -user alex.rivera -password-file /path/to/password
+bin/winrm -host win-host-47.example.com -user alex.rivera -password-file /path/to/alex.rivera.password
 ```
 
 The password file contains only the password, optionally followed by a newline;
@@ -109,7 +109,7 @@ without an interactive prompt), or `-command "whoami"` to run a single command.
 For example, a noninteractive check using the same persistent shell is:
 
 ```sh
-printf 'hostname\nwhoami\nexit\n' | bin/winrm -host win-host-47.example.com -user alex.rivera -password-file /path/to/password
+printf 'hostname\nwhoami\nexit\n' | bin/winrm -host win-host-47.example.com -user alex.rivera -password-file /path/to/alex.rivera.password
 ```
 
 WinRM/WinRS does not provide an SSH-style PTY: this is a line-oriented shell,
