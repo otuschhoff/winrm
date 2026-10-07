@@ -1,6 +1,8 @@
 # WinRM for Go
 
-_Note_: if you're looking for the `winrm` command-line tool, this has been splitted from this project and is available at [winrm-cli](https://github.com/masterzen/winrm-cli)
+This project is primarily a library, but includes a small streaming shell client
+in `cmd/winrm`. The separate [winrm-cli](https://github.com/masterzen/winrm-cli)
+project is another command-line option.
 
 This is a Go library to execute remote commands on Windows machines through
 the use of WinRM/WinRS.
@@ -76,7 +78,52 @@ go version
 
 ## Command-line usage
 
-For command-line usage check the [winrm-cli project](https://github.com/masterzen/winrm-cli)
+Build the included client:
+
+```sh
+go build -o bin/winrm ./cmd/winrm
+```
+
+Connect to a persistent `cmd.exe` session using Kerberos:
+
+```sh
+bin/winrm -host win-host-47.example.com -user alex.rivera -password-file /path/to/password
+```
+
+The password file contains only the password, optionally followed by a newline;
+restrict its permissions to your user. Alternatively set `WINRM_PASSWORD`.
+Passwords are never accepted as command-line arguments. The realm defaults to
+the realm in `user@REALM` or `default_realm` in `/etc/krb5.conf`; override it with
+`-realm` and the configuration path with `-krb-config`. Use the host's FQDN when
+its Kerberos SPN is registered under that name. An existing FILE-format Kerberos
+ticket cache can be selected explicitly with `-ccache /path/to/krb5cc`.
+
+Type commands normally; the remote process stays alive, preserving the working
+directory and environment. Type `exit` to disconnect, or press Ctrl+C to cancel
+the session and clean up the remote command and shell. Input is line-buffered
+and LF line endings are converted to CRLF. Stdin EOF is forwarded to the server.
+Output and stderr are streamed concurrently with input.
+
+Use `-shell powershell` for a persistent PowerShell process (stdin command mode,
+without an interactive prompt), or `-command "whoami"` to run a single command.
+For example, a noninteractive check using the same persistent shell is:
+
+```sh
+printf 'hostname\nwhoami\nexit\n' | bin/winrm -host win-host-47.example.com -user alex.rivera -password-file /path/to/password
+```
+
+WinRM/WinRS does not provide an SSH-style PTY: this is a line-oriented shell,
+not a full terminal, and full-screen applications, console key handling, and
+terminal resizing are not supported. The client returns the remote exit code
+when it fits the local process exit-code range, otherwise 1; local errors
+return nonzero and Ctrl+C returns 130.
+
+Kerberos over HTTP (default port 5985) uses message encryption. `-https` selects
+certificate-verified TLS and port 5986; `-ca` supplies a private PEM CA.
+Local-account Basic authentication requires `-auth basic -https`. No plaintext
+Basic or certificate-verification bypass is offered. `-port` overrides the port,
+and `-timeout` sets the per-request timeout, not the lifetime of the session.
+Run `bin/winrm -help` for all options.
 
 ## Library Usage
 

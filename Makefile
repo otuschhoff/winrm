@@ -8,6 +8,7 @@ all: deps
 	@mkdir -p bin/
 	@printf "$(OK_COLOR)==> Building$(NO_COLOR)\n"
 	@go build github.com/otuschhoff/winrm
+	@go build -o bin/winrm ./cmd/winrm
 
 deps:
 	@printf "$(OK_COLOR)==> Installing dependencies$(NO_COLOR)\n"

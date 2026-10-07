@@ -31,3 +31,6 @@ user
 krb5.keytab
 pw
 target
+bin/
+alex.rivera.password
+jamie.chen.password
