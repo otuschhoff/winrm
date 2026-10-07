@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"os/user"
+	"strconv"
 	"strings"
 	"time"
 
@@ -48,7 +49,22 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 	flags.StringVar(&o.ccache, "ccache", "", "Kerberos FILE credential cache instead of a password")
 	flags.StringVar(&o.passwordFile, "password-file", "", "password file (otherwise use WINRM_PASSWORD or prompt)")
 	flags.StringVar(&o.caFile, "ca", "", "PEM CA certificate for HTTPS")
-	flags.StringVar(&o.shell, "shell", "cmd", "persistent shell: cmd or powershell")
+	flags.StringVar(&o.shell, "shell", "powershell", "shell mode: powershell, ps (alias), or cmd")
+	selectShell := func(enabledMode, disabledMode string) func(string) error {
+		return func(value string) error {
+			enabled, err := strconv.ParseBool(value)
+			if err != nil {
+				return err
+			}
+			o.shell = disabledMode
+			if enabled {
+				o.shell = enabledMode
+			}
+			return nil
+		}
+	}
+	flags.BoolFunc("ps", "use PowerShell mode (default)", selectShell("powershell", "cmd"))
+	flags.BoolFunc("cmd", "use legacy cmd.exe mode (shortcut for -shell cmd)", selectShell("cmd", "powershell"))
 	flags.StringVar(&o.command, "command", "", "run one command instead of an interactive shell")
 	flags.IntVar(&o.port, "port", 0, "alias for -p")
 	flags.BoolVar(&o.https, "https", false, "use certificate-verified HTTPS")
@@ -118,8 +134,11 @@ func parseOptions(args []string, stderr io.Writer) (options, error) {
 			return o, errors.New("local username is empty; specify -l")
 		}
 	}
+	if o.shell == "ps" {
+		o.shell = "powershell"
+	}
 	if o.shell != "cmd" && o.shell != "powershell" {
-		return o, errors.New("-shell must be cmd or powershell")
+		return o, errors.New("-shell must be cmd, powershell, or ps")
 	}
 	if o.port == 0 {
 		o.port = 5985
@@ -227,6 +246,19 @@ func newClient(o options, prompt func() (string, error)) (*winrm.Client, error) 
 	return winrm.NewClientWithParameters(endpoint, o.user, password, &params)
 }
 
+func shellCommand(o options) string {
+	if o.command == "" {
+		if o.shell == "powershell" {
+			return "powershell.exe -NoLogo -NoProfile -Command -"
+		}
+		return "cmd.exe /D /Q"
+	}
+	if o.shell == "powershell" {
+		return winrm.Powershell(o.command)
+	}
+	return o.command
+}
+
 func run(ctx context.Context, args []string, stdin io.ReadCloser, stdout, stderr io.Writer) (code int, resultErr error) {
 	o, err := parseOptions(args, stderr)
 	if errors.Is(err, flag.ErrHelp) {
@@ -247,16 +279,7 @@ func run(ctx context.Context, args []string, stdin io.ReadCloser, stdout, stderr
 		return 1, fmt.Errorf("connect to %s: %w", o.host, err)
 	}
 	defer func() { resultErr = errors.Join(resultErr, shell.Close()) }()
-	command := o.command
-	if command == "" {
-		command = "cmd.exe /D /Q"
-		if o.shell == "powershell" {
-			command = "powershell.exe -NoLogo -NoProfile -Command -"
-		}
-	} else if o.shell == "powershell" {
-		command = winrm.Powershell(command)
-	}
-	cmd, err := shell.ExecuteWithContext(ctx, command)
+	cmd, err := shell.ExecuteWithContext(ctx, shellCommand(o))
 	if err != nil {
 		return 1, fmt.Errorf("start remote command: %w", err)
 	}

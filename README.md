@@ -84,7 +84,7 @@ Build the included client:
 go build -o bin/winrm ./cmd/winrm
 ```
 
-Connect to a persistent `cmd.exe` session using Kerberos:
+Connect to a persistent PowerShell session using Kerberos:
 
 ```sh
 bin/winrm alex.rivera@win-host-47.example.com
@@ -100,7 +100,7 @@ winrm alex.rivera@win-host-47.example.com whoami
 
 Options must precede the destination; everything after it is a remote command,
 joined with spaces as SSH does, so quote remote shell expressions appropriately.
-Without a command, the client starts a persistent shell. Without an explicit
+Without a command, the client starts a persistent PowerShell process. Without an explicit
 username, it uses the local login name (unless using `-ccache`). `-l` overrides
 the username in the destination. Attached arguments such as `-p5985` and
 `-lalex.rivera`, and short-option groups such as `-Tp5985`, are also accepted.
@@ -136,9 +136,18 @@ the session and clean up the remote command and shell. Input is line-buffered
 and LF line endings are converted to CRLF. Stdin EOF is forwarded to the server.
 Output and stderr are streamed concurrently with input.
 
-Use `-shell powershell` for a persistent PowerShell process (stdin command mode,
-without an interactive prompt), or append `whoami` after the destination to run
-a single command.
+PowerShell is the default for both persistent sessions and single commands.
+Persistent PowerShell runs in stdin command mode without an interactive prompt.
+Use `-cmd` or `-shell cmd` to select legacy `cmd.exe` mode, or explicitly select
+PowerShell with `-ps`, `-shell ps`, or `-shell powershell`. If multiple
+shell-selection options are supplied, the last one wins; `-ps=false` selects
+CMD and `-cmd=false` selects PowerShell.
+
+```sh
+bin/winrm alex.rivera@win-host-47.example.com 'Get-Location'
+bin/winrm -cmd alex.rivera@win-host-47.example.com
+bin/winrm -cmd alex.rivera@win-host-47.example.com 'echo %CD%'
+```
 For example, a noninteractive check using the same persistent shell is:
 
 ```sh

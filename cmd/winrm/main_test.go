@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/otuschhoff/winrm"
 )
 
 func TestParseOptions(t *testing.T) {
@@ -101,6 +103,78 @@ func TestSSHOptions(t *testing.T) {
 	}
 	if !strings.Contains(help.String(), "[user@]host [command") {
 		t.Fatal("help does not describe SSH-style syntax")
+	}
+}
+
+func TestPowerShellAlias(t *testing.T) {
+	for _, command := range []string{"", "Write-Output hello"} {
+		for _, shellFlags := range [][]string{{}, {"-shell", "powershell"}, {"-shell", "ps"}, {"-ps"}} {
+			args := append(append([]string{}, shellFlags...), "alice@windows")
+			if command != "" {
+				args = append(args, command)
+			}
+			o, err := parseOptions(args, io.Discard)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if o.shell != "powershell" || o.command != command {
+				t.Fatalf("shell=%q command=%q", o.shell, o.command)
+			}
+		}
+	}
+	o, err := parseOptions([]string{"-host", "windows", "-user", "alice", "-shell", "ps", "-command", "Write-Output hello"}, io.Discard)
+	if err != nil || o.shell != "powershell" || o.command != "Write-Output hello" {
+		t.Fatalf("legacy alias: shell=%q command=%q err=%v", o.shell, o.command, err)
+	}
+	for _, tt := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"-shell", "cmd", "-ps", "alice@windows"}, "powershell"},
+		{[]string{"-ps", "-shell", "cmd", "alice@windows"}, "cmd"},
+		{[]string{"-ps=false", "alice@windows"}, "cmd"},
+		{[]string{"-p5985", "-ps", "alice@windows"}, "powershell"},
+		{[]string{"-ps", "alice@windows", "tool", "-ps"}, "powershell"},
+		{[]string{"-cmd", "alice@windows"}, "cmd"},
+		{[]string{"-shell", "cmd", "alice@windows"}, "cmd"},
+		{[]string{"-cmd", "-ps", "alice@windows"}, "powershell"},
+		{[]string{"-ps", "-cmd", "alice@windows"}, "cmd"},
+		{[]string{"-shell", "ps", "-cmd", "alice@windows"}, "cmd"},
+		{[]string{"-cmd", "-shell", "powershell", "alice@windows"}, "powershell"},
+		{[]string{"-cmd=false", "alice@windows"}, "powershell"},
+	} {
+		o, err := parseOptions(tt.args, io.Discard)
+		if err != nil || o.shell != tt.want {
+			t.Fatalf("args=%v shell=%q err=%v", tt.args, o.shell, err)
+		}
+	}
+	if _, err := parseOptions([]string{"-ps=invalid", "alice@windows"}, io.Discard); err == nil {
+		t.Fatal("invalid boolean accepted")
+	}
+	if _, err := parseOptions([]string{"-cmd=invalid", "alice@windows"}, io.Discard); err == nil {
+		t.Fatal("invalid CMD boolean accepted")
+	}
+}
+
+func TestShellCommand(t *testing.T) {
+	for _, tt := range []struct {
+		args []string
+		want string
+	}{
+		{[]string{"alice@windows"}, "powershell.exe -NoLogo -NoProfile -Command -"},
+		{[]string{"-ps", "alice@windows"}, "powershell.exe -NoLogo -NoProfile -Command -"},
+		{[]string{"alice@windows", "Write-Output hello"}, winrm.Powershell("Write-Output hello")},
+		{[]string{"-cmd", "alice@windows"}, "cmd.exe /D /Q"},
+		{[]string{"-shell", "cmd", "alice@windows"}, "cmd.exe /D /Q"},
+		{[]string{"-cmd", "alice@windows", "echo", "hello"}, "echo hello"},
+	} {
+		o, err := parseOptions(tt.args, io.Discard)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := shellCommand(o); got != tt.want {
+			t.Fatalf("args=%v command=%q want=%q", tt.args, got, tt.want)
+		}
 	}
 }
 
