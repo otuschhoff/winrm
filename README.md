@@ -137,7 +137,7 @@ and LF line endings are converted to CRLF. Stdin EOF is forwarded to the server.
 Output and stderr are streamed concurrently with input.
 
 PowerShell is the default for both persistent sessions and single commands.
-Persistent PowerShell runs in stdin command mode without an interactive prompt.
+Persistent PowerShell uses `-File -` to display its prompt and read stdin.
 Use `-cmd` or `-shell cmd` to select legacy `cmd.exe` mode, or explicitly select
 PowerShell with `-ps`, `-shell ps`, or `-shell powershell`. If multiple
 shell-selection options are supplied, the last one wins; `-ps=false` selects
@@ -164,8 +164,23 @@ Kerberos over HTTP (default port 5985) uses message encryption. `-https` selects
 certificate-verified TLS and port 5986; `-ca` supplies a private PEM CA.
 Local-account Basic authentication requires `-auth basic -https`. No plaintext
 Basic or certificate-verification bypass is offered. `-p` overrides the port,
-and `-timeout` sets the per-request timeout, not the lifetime of the session.
+and `-timeout` sets the per-request HTTP timeout, not the lifetime of the session.
+The client uses a one-second WinRM operation timeout so idle output polling
+releases the serialized Kerberos transport promptly for typed input. This does
+not limit how long a remote command can run or change the library's defaults.
 Run `bin/winrm -help` for all options.
+
+The opt-in CLI regression test checks an initial PowerShell prompt, command
+responses within five seconds while stdin remains open, persistent variables,
+and clean exit, both in default PowerShell and after typing `powershell` in CMD:
+
+```sh
+WINRM_CLI_INTEGRATION=1 WINRM_HOST=win-host-47.example.com \
+  WINRM_USER=alex.rivera WINRM_PASSWORD_FILE=/path/to/alex.rivera.password \
+  go test -count=1 -timeout=90s -run '^TestPowerShellPromptIntegration$' -v ./cmd/winrm
+```
+
+It also accepts `WINRM_PASSWORD`, `WINRM_KRB_REALM`, and `WINRM_KRB_CONFIG`.
 
 ## Library Usage
 

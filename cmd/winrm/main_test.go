@@ -161,8 +161,8 @@ func TestShellCommand(t *testing.T) {
 		args []string
 		want string
 	}{
-		{[]string{"alice@windows"}, "powershell.exe -NoLogo -NoProfile -Command -"},
-		{[]string{"-ps", "alice@windows"}, "powershell.exe -NoLogo -NoProfile -Command -"},
+		{[]string{"alice@windows"}, "powershell.exe -NoLogo -NoProfile -File -"},
+		{[]string{"-ps", "alice@windows"}, "powershell.exe -NoLogo -NoProfile -File -"},
 		{[]string{"alice@windows", "Write-Output hello"}, winrm.Powershell("Write-Output hello")},
 		{[]string{"-cmd", "alice@windows"}, "cmd.exe /D /Q"},
 		{[]string{"-shell", "cmd", "alice@windows"}, "cmd.exe /D /Q"},
@@ -189,6 +189,28 @@ func TestHelpAndMissingPassword(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "password") {
 		t.Fatalf("missing password: %v", err)
+	}
+}
+
+func TestClientOperationTimeout(t *testing.T) {
+	t.Setenv("WINRM_PASSWORD", "representative-test-password")
+	o, err := parseOptions([]string{"-auth", "basic", "-https", "alice@windows.example.com"}, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client, err := newClient(o, func() (string, error) {
+		t.Fatal("unexpected password prompt")
+		return "", nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+	if client.Timeout != "PT1S" {
+		t.Fatalf("interactive operation timeout=%q", client.Timeout)
+	}
+	if winrm.DefaultParameters.Timeout != "PT60S" {
+		t.Fatal("client changed the library operation timeout")
 	}
 }
 

@@ -214,6 +214,8 @@ func newClient(o options, prompt func() (string, error)) (*winrm.Client, error) 
 	}
 	endpoint := winrm.NewEndpoint(o.host, o.port, o.https, false, ca, nil, nil, o.timeout)
 	params := *winrm.DefaultParameters
+	// Kerberos serializes requests, so idle Receive calls must yield to stdin.
+	params.Timeout = "PT1S"
 	if o.auth == "kerberos" {
 		username, realm, found := strings.Cut(o.user, "@")
 		if found {
@@ -249,7 +251,7 @@ func newClient(o options, prompt func() (string, error)) (*winrm.Client, error) 
 func shellCommand(o options) string {
 	if o.command == "" {
 		if o.shell == "powershell" {
-			return "powershell.exe -NoLogo -NoProfile -Command -"
+			return "powershell.exe -NoLogo -NoProfile -File -"
 		}
 		return "cmd.exe /D /Q"
 	}
