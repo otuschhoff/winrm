@@ -108,6 +108,17 @@ Use `-l alex.rivera@EXAMPLE.COM host` or
 `alex.rivera@EXAMPLE.COM@host` for an explicit Kerberos principal.
 Bracketed IPv6 destinations such as `alex.rivera@[::1]` are supported.
 
+For IPv4 or IPv6 destinations, the CLI first performs a reverse-DNS lookup,
+bounded by `-timeout`. It uses the first usable returned hostname (without the
+trailing DNS dot) for the Kerberos `HTTP/<hostname>` SPN and HTTPS certificate
+verification/SNI, while keeping the connection URL and network destination at
+the original IP. Hostname destinations are unchanged. No forward lookup is
+needed to connect to the IP. This applies to both Kerberos and Basic-over-HTTPS
+connections. If no usable hostname is returned, the client fails with a PTR
+configuration hint rather than falling back to an IP-based identity.
+Ensure the PTR record names the intended server and matches its SPN and TLS
+certificate; reverse DNS supplies the name, not proof of the server's identity.
+
 `-T` is accepted for compatibility: WinRM always operates without a PTY.
 `-t`/`-tt` are rejected rather than pretending to allocate one. SSH port
 forwarding, key-file authentication (`-i`), SSH config files, and SSH `-o`

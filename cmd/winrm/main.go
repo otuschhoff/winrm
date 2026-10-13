@@ -21,7 +21,7 @@ import (
 
 type options struct {
 	host, user, auth, realm, krbConfig, ccache, passwordFile string
-	caFile, shell, command                                   string
+	caFile, shell, command, identityHost                     string
 	port                                                     int
 	https                                                    bool
 	timeout                                                  time.Duration
@@ -220,6 +220,7 @@ func newClient(o options, prompt func() (string, error)) (*winrm.Client, error) 
 		}
 	}
 	endpoint := winrm.NewEndpoint(o.host, o.port, o.https, false, ca, nil, nil, o.timeout)
+	endpoint.TLSServerName = o.identityHost
 	params := *winrm.DefaultParameters
 	// Kerberos serializes requests, so idle Receive calls must yield to stdin.
 	params.Timeout = "PT1S"
@@ -248,6 +249,7 @@ func newClient(o options, prompt func() (string, error)) (*winrm.Client, error) 
 			return &winrm.ClientKerberos{
 				Username: username, Password: password, Realm: o.realm,
 				KrbConf: o.krbConfig, KrbCCache: o.ccache,
+				SPN:               "HTTP/" + targetIdentity(o),
 				MessageEncryption: winrm.KerberosEncryptionAuto,
 			}
 		}
@@ -270,6 +272,12 @@ func shellCommand(o options) string {
 }
 
 func run(ctx context.Context, args []string, stdin io.ReadCloser, stdout, stderr io.Writer) (code int, resultErr error) {
+	return runWithResolver(ctx, args, stdin, stdout, stderr, net.DefaultResolver.LookupAddr)
+}
+
+func runWithResolver(ctx context.Context, args []string, stdin io.ReadCloser, stdout, stderr io.Writer,
+	lookupAddr func(context.Context, string) ([]string, error),
+) (code int, resultErr error) {
 	o, err := parseOptions(args, stderr)
 	if errors.Is(err, flag.ErrHelp) {
 		return 0, nil
@@ -280,6 +288,10 @@ func run(ctx context.Context, args []string, stdin io.ReadCloser, stdout, stderr
 			return 1, err
 		}
 		return 2, withOperation("parse options", "Invalid command-line options. Run winrm -help for usage.", err)
+	}
+	o, err = resolveTarget(ctx, o, lookupAddr)
+	if err != nil {
+		return 1, err
 	}
 	client, err := newClient(o, func() (string, error) {
 		return promptPassword(ctx, stdin, stderr)

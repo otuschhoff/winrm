@@ -118,6 +118,9 @@ func TestBasicHTTPErrorPresentation(t *testing.T) {
 		{200, "valid WinRM SOAP response"},
 	} {
 		server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.TLS.ServerName == "" || !strings.HasPrefix(r.Host, "127.0.0.1:") {
+				t.Errorf("IP connection or resolved-name SNI missing: host=%q SNI=%q", r.Host, r.TLS.ServerName)
+			}
 			w.Header().Set("Content-Type", "text/plain")
 			w.WriteHeader(tt.status)
 			_, _ = io.WriteString(w, "private-server-response-must-not-be-displayed")
@@ -136,8 +139,11 @@ func TestBasicHTTPErrorPresentation(t *testing.T) {
 			t.Fatal(err)
 		}
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		code, resultErr := run(ctx, []string{"-auth", "basic", "-https", "-ca", caPath, "-p", port, "alice@" + host},
-			io.NopCloser(strings.NewReader("")), io.Discard, io.Discard)
+		code, resultErr := runWithResolver(ctx, []string{"-auth", "basic", "-https", "-ca", caPath, "-p", port, "alice@" + host},
+			io.NopCloser(strings.NewReader("")), io.Discard, io.Discard,
+			func(context.Context, string) ([]string, error) {
+				return []string{server.Certificate().DNSNames[0]}, nil
+			})
 		cancel()
 		server.Close()
 		if code != 1 || resultErr == nil {

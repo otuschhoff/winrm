@@ -80,6 +80,9 @@ func summarizeCLIError(err error) string {
 		if operation.operation == "parse options" {
 			return "Invalid command-line options. " + operation.err.Error() + " Run winrm -help for usage."
 		}
+		if operation.operation == "resolve target hostname" {
+			return operation.hint
+		}
 		if summary := knownErrorSummary(operation.err); summary != "" {
 			return operation.operation + ": " + summary
 		}
