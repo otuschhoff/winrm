@@ -142,8 +142,14 @@ its Kerberos SPN is registered under that name. An existing FILE-format Kerberos
 ticket cache can be selected explicitly with `-ccache /path/to/krb5cc`.
 
 Type commands normally; the remote process stays alive, preserving the working
-directory and environment. Type `exit` to disconnect, or press Ctrl+C to cancel
-the session and clean up the remote command and shell. Input is line-buffered
+directory and environment. In a terminal-backed persistent session, Ctrl+C is
+forwarded as the WinRS `ctrl_c` console signal: it interrupts remote foreground
+work without canceling the client connection or deleting the shell. The remote
+process decides how to handle the interrupt; programs may ignore it or exit.
+Repeated interrupts are supported, and forwarding failures are reported while
+leaving the session open. Type `exit` to disconnect and clean up the shell.
+During password entry or connection setup, and for single-command or piped
+runs, Ctrl+C still cancels the client. Input is line-buffered
 and LF line endings are converted to CRLF. Stdin EOF is forwarded to the server.
 Output and stderr are streamed concurrently with input.
 
@@ -169,7 +175,8 @@ WinRM/WinRS does not provide an SSH-style PTY: this is a line-oriented shell,
 not a full terminal, and full-screen applications, console key handling, and
 terminal resizing are not supported. The client returns the remote exit code
 when it fits the local process exit-code range, otherwise 1; local errors
-return nonzero and Ctrl+C returns 130.
+return nonzero. Local Ctrl+C cancellation returns 130; forwarding Ctrl+C during
+an interactive shell does not force a local exit code.
 
 Kerberos over HTTP (default port 5985) uses message encryption. `-https` selects
 certificate-verified TLS and port 5986; `-ca` supplies a private PEM CA.
@@ -233,8 +240,9 @@ A nonzero remote exit status is reported with its original code and a reminder
 to inspect the remote output; it is not presented as a connection failure.
 Successful commands and `-help` produce no error report. Invalid options return
 2 with a usage hint instead of dumping the full option list, local errors return
-nonzero, and Ctrl+C returns 130 with a cancellation summary. Remote exit-code
-propagation is otherwise unchanged.
+nonzero, and local Ctrl+C cancellation returns 130 with a cancellation summary.
+An interactive shell instead forwards Ctrl+C without canceling its context;
+remote exit-code propagation is otherwise unchanged.
 
 The CLI preserves error chains. HTTP response errors expose an
 `HTTPStatusCode() int` method so callers can classify Basic-authentication and
@@ -370,6 +378,10 @@ Call `Client.Close` when the client is no longer needed so active commands are
 cancelled and Kerberos credentials and idle connections are released. Command
 and shell cleanup is bounded to five seconds. A stdin reader that can block
 must implement `io.Closer` for context cancellation to interrupt its read.
+`Command.InterruptWithContext` sends the WinRS Ctrl+C signal without canceling
+the command context or consuming its termination cleanup. It can be called
+repeatedly; the remote console process determines the outcome. Supply a bounded
+context, as interrupt requests share the transport with output polling.
 `NewClientKerberosWithDial` and `NewClientKerberosWithProxyFunc` provide custom
 network routing without changing SPN derivation.
 

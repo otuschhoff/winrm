@@ -23,7 +23,7 @@ func defaultHeaders(message *soap.SoapMessage, url string, params *Parameters) *
 		Timeout(params.Timeout)
 }
 
-//NewOpenShellRequest makes a new soap request
+// NewOpenShellRequest makes a new soap request
 func NewOpenShellRequest(uri string, params *Parameters) *soap.SoapMessage {
 	if params == nil {
 		params = DefaultParameters
@@ -93,7 +93,7 @@ func NewExecuteCommandRequest(uri, shellID, command string, arguments []string, 
 	return message
 }
 
-//NewGetOutputRequest NewGetOutputRequest
+// NewGetOutputRequest NewGetOutputRequest
 func NewGetOutputRequest(uri, shellID, commandID, streams string, params *Parameters) *soap.SoapMessage {
 	if params == nil {
 		params = DefaultParameters
@@ -113,7 +113,7 @@ func NewGetOutputRequest(uri, shellID, commandID, streams string, params *Parame
 	return message
 }
 
-//NewSendInputRequest NewSendInputRequest
+// NewSendInputRequest NewSendInputRequest
 func NewSendInputRequest(uri, shellID, commandID string, input []byte, eof bool, params *Parameters) *soap.SoapMessage {
 	if params == nil {
 		params = DefaultParameters
@@ -139,8 +139,17 @@ func NewSendInputRequest(uri, shellID, commandID string, input []byte, eof bool,
 	return message
 }
 
-//NewSignalRequest NewSignalRequest
+// NewSignalRequest NewSignalRequest
 func NewSignalRequest(uri string, shellID string, commandID string, params *Parameters) *soap.SoapMessage {
+	return newSignalRequest(uri, shellID, commandID, "terminate", params)
+}
+
+// NewCtrlCRequest sends a console interrupt without terminating the WinRM command.
+func NewCtrlCRequest(uri, shellID, commandID string, params *Parameters) *soap.SoapMessage {
+	return newSignalRequest(uri, shellID, commandID, "ctrl_c", params)
+}
+
+func newSignalRequest(uri, shellID, commandID, signalCode string, params *Parameters) *soap.SoapMessage {
 	if params == nil {
 		params = DefaultParameters
 	}
@@ -155,7 +164,7 @@ func NewSignalRequest(uri string, shellID string, commandID string, params *Para
 	signal := message.CreateBodyElement("Signal", soap.DOM_NS_WIN_SHELL)
 	signal.SetAttr("CommandId", commandID)
 	code := message.CreateElement(signal, "Code", soap.DOM_NS_WIN_SHELL)
-	code.SetContent("http://schemas.microsoft.com/wbem/wsman/1/windows/shell/signal/terminate")
+	code.SetContent("http://schemas.microsoft.com/wbem/wsman/1/windows/shell/signal/" + signalCode)
 
 	return message
 }

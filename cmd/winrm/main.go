@@ -278,6 +278,12 @@ func run(ctx context.Context, args []string, stdin io.ReadCloser, stdout, stderr
 func runWithResolver(ctx context.Context, args []string, stdin io.ReadCloser, stdout, stderr io.Writer,
 	lookupAddr func(context.Context, string) ([]string, error),
 ) (code int, resultErr error) {
+	return runSession(ctx, args, stdin, stdout, stderr, lookupAddr, nil)
+}
+
+func runSession(ctx context.Context, args []string, stdin io.ReadCloser, stdout, stderr io.Writer,
+	lookupAddr func(context.Context, string) ([]string, error), interrupts *interruptHandler,
+) (code int, resultErr error) {
 	o, err := parseOptions(args, stderr)
 	if errors.Is(err, flag.ErrHelp) {
 		return 0, nil
@@ -313,14 +319,40 @@ func runWithResolver(ctx context.Context, args []string, stdin io.ReadCloser, st
 	if err != nil {
 		return 1, withOperation("start remote command", "Could not start the remote process. Check the command, shell executable, and server restrictions in Details.", err)
 	}
+	if interrupts != nil && interactiveInput(o, stdin) {
+		interrupts.mu.Lock()
+		previous := interrupts.handle
+		interrupts.handle = forwardInterrupt(ctx, cmd.InterruptWithContext, stderr)
+		interrupts.mu.Unlock()
+		defer interrupts.set(previous)
+		stdin = terminalStreamInput(stdin)
+	}
 	code, err = streamCommand(ctx, cmd, stdin, stdout, stderr)
 	return code, err
 }
 
 func main() {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	code, err := run(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr)
+	interrupts := &interruptHandler{handle: cancel}
+	signals := make(chan os.Signal, 1)
+	signal.Notify(signals, os.Interrupt)
+	defer signal.Stop(signals)
+	done, stopped := make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(stopped)
+		for {
+			select {
+			case <-signals:
+				interrupts.dispatch()
+			case <-done:
+				return
+			}
+		}
+	}()
+	code, err := runSession(ctx, os.Args[1:], os.Stdin, os.Stdout, os.Stderr, net.DefaultResolver.LookupAddr, interrupts)
+	close(done)
+	<-stopped
 	os.Exit(reportResult(ctx, code, err, os.Stderr))
 }
 

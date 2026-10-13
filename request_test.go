@@ -103,6 +103,14 @@ func (s *WinRMSuite) TestSignalRequest(c *C) {
 	assertXPath(c, request.Doc(), "//rsp:Signal[@CommandId=\"COMMANDID\"]/rsp:Code", "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/signal/terminate")
 }
 
+func (s *WinRMSuite) TestCtrlCRequest(c *C) {
+	request := NewCtrlCRequest("http://localhost", "SHELLID", "COMMANDID", nil)
+	defer request.Free()
+	assertXPath(c, request.Doc(), "//a:Action", "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/Signal")
+	assertXPath(c, request.Doc(), "//w:Selector[@Name=\"ShellId\"]", "SHELLID")
+	assertXPath(c, request.Doc(), "//rsp:Signal[@CommandId=\"COMMANDID\"]/rsp:Code", "http://schemas.microsoft.com/wbem/wsman/1/windows/shell/signal/ctrl_c")
+}
+
 func assertXPath(c *C, doc *dom.Document, request string, expected string) {
 	nodes, err := parseXPath(doc, request)
 

@@ -25,6 +25,7 @@ type blockingCommandTransport struct {
 	receiveResponses []string
 	receiveIndex     int
 	signals          int
+	interrupts       int
 	deletes          int
 	closed           int
 	receiveErr       error
@@ -106,7 +107,11 @@ func (transport *blockingCommandTransport) PostContext(ctx context.Context, _ *C
 		return "", transport.sendErr
 	case strings.Contains(message, "shell/Signal"):
 		transport.mu.Lock()
-		transport.signals++
+		if strings.Contains(message, "shell/signal/ctrl_c") {
+			transport.interrupts++
+		} else {
+			transport.signals++
+		}
 		transport.mu.Unlock()
 		return "", transport.signalErr
 	case strings.Contains(message, "transfer/Delete"):
@@ -134,6 +139,77 @@ func (transport *blockingCommandTransport) counts() (signals, deletes, closed in
 
 func newBlockingCommandClient(transport *blockingCommandTransport) *Client {
 	return &Client{Parameters: *DefaultParameters, url: "http://host.example.test/wsman", http: transport}
+}
+
+func TestCommandInterruptPreservesSession(t *testing.T) {
+	transport := newBlockingCommandTransport()
+	client := newBlockingCommandClient(transport)
+	defer client.Close()
+	shell, err := client.CreateShellWithContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd, err := shell.ExecuteWithContext(context.Background(), "powershell.exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-transport.receiveStarted
+	for i := 0; i < 2; i++ {
+		if err := cmd.InterruptWithContext(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if cmd.ctx.Err() != nil || cmd.signaled {
+		t.Fatal("Ctrl+C canceled the command or consumed termination cleanup")
+	}
+	if _, err := cmd.Stdin.Write([]byte("echo still-connected\r\n")); err != nil {
+		t.Fatalf("stdin stopped accepting commands: %v", err)
+	}
+	if err := cmd.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cmd.Wait()
+	transport.mu.Lock()
+	defer transport.mu.Unlock()
+	if transport.interrupts != 2 || transport.signals != 1 {
+		t.Fatalf("interrupts=%d termination signals=%d", transport.interrupts, transport.signals)
+	}
+}
+
+func TestCommandInterruptFailureAndCancellation(t *testing.T) {
+	transport := newBlockingCommandTransport()
+	client := newBlockingCommandClient(transport)
+	defer client.Close()
+	shell, err := client.CreateShellWithContext(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd, err := shell.ExecuteWithContext(context.Background(), "cmd.exe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-transport.receiveStarted
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := cmd.InterruptWithContext(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("cancellation lost: %v", err)
+	}
+	failure := errors.New("interrupt rejected")
+	transport.signalErr = failure
+	if err := cmd.InterruptWithContext(context.Background()); !errors.Is(err, failure) {
+		t.Fatalf("interrupt error lost: %v", err)
+	}
+	if cmd.ctx.Err() != nil || cmd.signaled {
+		t.Fatal("failed interrupt destroyed the session")
+	}
+	transport.signalErr = nil
+	if err := cmd.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cmd.Wait()
+	if err := cmd.InterruptWithContext(context.Background()); !errors.Is(err, context.Canceled) {
+		t.Fatalf("finished command accepted an interrupt: %v", err)
+	}
 }
 
 func TestCommandCancellationInterruptsReceiveAndCleansUp(t *testing.T) {

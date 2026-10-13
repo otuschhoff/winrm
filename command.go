@@ -173,6 +173,36 @@ func (c *Command) check() error {
 	return nil
 }
 
+// InterruptWithContext sends Ctrl+C to the remote console without closing the
+// command or canceling its context. The remote process decides how to handle it.
+func (c *Command) InterruptWithContext(ctx context.Context) error {
+	if err := c.check(); err != nil {
+		return err
+	}
+	operationContext, finish, err := c.client.beginOperation(ctx)
+	if err != nil {
+		return err
+	}
+	defer finish()
+	c.initSignalGate()
+	select {
+	case <-operationContext.Done():
+		return operationContext.Err()
+	case <-c.signalGate:
+	}
+	defer func() { c.signalGate <- struct{}{} }()
+	if err := operationContext.Err(); err != nil {
+		return err
+	}
+	if err := c.ctx.Err(); err != nil {
+		return err
+	}
+	request := NewCtrlCRequest(c.client.url, c.shell.id, c.id, &c.client.Parameters)
+	defer request.Free()
+	_, err = c.client.sendRequestContext(operationContext, request)
+	return err
+}
+
 // Close will terminate the running command
 func (c *Command) Close() error {
 	ctx, cancel := context.WithTimeout(context.Background(), commandCleanupTimeout)

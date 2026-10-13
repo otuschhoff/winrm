@@ -171,7 +171,7 @@ func systemErrorSummary(err error) string {
 	case errors.Is(err, errEmptyPassword):
 		return "No password was entered. Enter a nonempty password or supply credentials using -password-file, WINRM_PASSWORD, or -ccache."
 	case errors.Is(err, context.Canceled):
-		return "The operation was canceled. If you pressed Ctrl+C, the client is disconnecting."
+		return "The operation was canceled. The client is stopping the affected operation."
 	}
 	var dns *net.DNSError
 	if errors.As(err, &dns) {
